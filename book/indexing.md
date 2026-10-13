@@ -45,6 +45,14 @@ is replaced by its value.
 ```julia
 f[[:a, :b], :x]        # Form(a=1, b=3)
 f[[:a, :b], [:x]]      # Form(a=Form(x=1), b=Form(x=3)) — a nested level per vector
+f[2:3]                 # Form(20, 30) — a range is a vector key, so it fans out
+```
+
+A range over the sequence's own collection gives the subsequence, as a sequence
+rather than a plain `Vector`, so it can be used as a container's sequence:
+
+```julia
+f.seq[2:3]             # the FormSeq holding 20 and 30
 ```
 
 With volatiles in the tree:

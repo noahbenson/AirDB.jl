@@ -7,7 +7,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Under `0.x`, SemVer puts breaking changes in the minor position and compatible
 fixes in the patch position, which is how the versions below are chosen.
 
-## [Unreleased]
+## [0.1.0] - 2026-10-12
 
 The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
 [Air.jl](https://github.com/noahbenson/Air.jl)'s software transactional memory.
@@ -19,8 +19,9 @@ The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
   Constructed with `Form(x)` for a leaf, `Form(seq, map)`, or `form(args...;
   kwargs...)`, and converted with `to_form`; `value(fs)` unwraps a scalar form.
 - **Rich indexing** along a path (`f[:a, :b]`), with vector keys fanning out into
-  a new form; `setindex` (functional) and `setindex!` (transactional, writing the
-  deepest `VolatileForm` on the path).
+  a new form; a range is a vector key, so `f[2:3]` yields the subsequence, and
+  `f.seq[2:3]` yields it as a sequence. `setindex` (functional) and `setindex!`
+  (transactional, writing the deepest `VolatileForm` on the path).
 - **The collection protocol**: `length`, `isempty`, `keys`, `values`, `pairs`,
   `iterate`, `first`, `last`, `copy`, `empty`, in one canonical order (sequence
   positions, then sorted map keys).
@@ -52,4 +53,4 @@ The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
   less allocation for the small forms that dominate.
 - The JSON reader works on UTF-8 bytes rather than decoding a `Char` per byte.
 
-[Unreleased]: https://github.com/noahbenson/AirDB.jl/commits/main
+[0.1.0]: https://github.com/noahbenson/AirDB.jl/releases/tag/v0.1.0
