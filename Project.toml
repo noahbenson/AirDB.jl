@@ -1,0 +1,22 @@
+name = "AirDB"
+uuid = "73fd445c-d6bc-414c-af00-abfc8fd116f6"
+version = "0.1.0"
+authors = ["Noah C. Benson <nben@uw.edu>"]
+
+[deps]
+Air = "0c3b9dc7-9fea-4423-80ce-ed7c11218d4a"
+LibPQ = "194296ae-ab2e-5f79-8cd4-7183a0a5a0d1"
+UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+
+[compat]
+Air = "0.2"
+LibPQ = "1"
+UUIDs = "1"
+julia = "1.10"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Aqua", "Test"]

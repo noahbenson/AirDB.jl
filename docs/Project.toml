@@ -1,0 +1,6 @@
+[deps]
+AirDB = "73fd445c-d6bc-414c-af00-abfc8fd116f6"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+
+[sources]
+AirDB = {path = ".."}

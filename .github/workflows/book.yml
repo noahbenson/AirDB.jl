@@ -1,0 +1,37 @@
+name: Book
+
+# Builds the Jupyter Book 2 / MyST guide in `book/` and publishes it to the
+# `/book/` subdirectory of GitHub Pages, leaving the Documenter site at the root
+# (built by `docs.yml`) untouched.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: book-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build the book
+        working-directory: book
+        run: npx -y mystmd@latest build --html
+      - name: Deploy to GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: book/_build/html
+          destination_dir: book
+          keep_files: true
