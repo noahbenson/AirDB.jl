@@ -25,6 +25,12 @@ Base.length(s::FormSeq) = length(s.v)
 Base.isempty(s::FormSeq) = isempty(s.v)
 Base.eachindex(s::FormSeq) = eachindex(s.v)
 Base.getindex(s::FormSeq, i::Integer) = s.v[i]
+# A range (or a vector of positions) yields the subsequence, as a `FormSeq` — not
+# a plain `Vector`, so the container it is assigned to stays a `FormSeq`.
+Base.getindex(s::FormSeq, r::AbstractRange{<:Integer}) =
+    FormSeq(FormValue[s.v[i] for i in r])
+Base.getindex(s::FormSeq, r::AbstractVector{<:Integer}) =
+    FormSeq(FormValue[s.v[i] for i in r])
 Base.iterate(s::FormSeq, st...) = iterate(s.v, st...)
 
 # Content equality, so a flat `Vector` and a promoted `PVector` agree.

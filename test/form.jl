@@ -156,6 +156,18 @@
         @test AirDB.to_JSON(h) == AirDB.to_JSON(f)
     end
 
+    @testset "sequence ranges" begin
+        f = form(10, 20, 30, 40)
+        @test f[2:3] == form(20, 30)          # a form over the subsequence
+        @test f[:] == f
+        @test collect(f.seq[2:3]) == Any[20, 30]
+        @test f.seq[2:3] isa AirDB.FormSeq    # the subsequence is a FormSeq, not a Vector
+        @test collect(f.seq[[1, 3]]) == Any[10, 30]
+        # a range past the flat threshold still promotes
+        big = form((1:40)...)
+        @test length(big.seq[10:30]) == 21
+    end
+
     @testset "small-to-large promotion" begin
         # a sequence grown past the flat threshold promotes and keeps working
         f = form(1, 2, 3)
