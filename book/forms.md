@@ -111,8 +111,8 @@ empty(f)           # Form() — the empty container
 A container carries a `held` flag, and a symbol scalar form carries the same idea
 as a leading colon on its name. `hold` sets it, `unhold` clears it, and `isheld`
 tests it. It is part of a form's value — a held form is not equal to an unheld one
-— but not of its JSON encoding, so a held form loaded from the database comes
-back unheld.
+— and it is written in the form's JSON, so a held form round-trips through the
+database.
 
 ```julia
 h = hold(form(a = 1))        # the same form, now held
@@ -178,8 +178,8 @@ sprint(show, Form(5))                  # "Form(5)"
 
 ## JSON
 
-A container is written as the two-element list `[seq, map]`, and a scalar form as
-its bare leaf, which makes the format self-describing. Strings and symbols are
+A container is written as the three-element list `[seq, map, held]`, and a scalar
+form as its bare leaf, which makes the format self-describing. Strings and symbols are
 both JSON strings, told apart by the first character inside the quotes (`'` for a
 string, `:` for a symbol); a float always carries a point or exponent; and a
 complex number is written as `{"re": …, "im": …}`.
@@ -187,7 +187,8 @@ complex number is written as `{"re": …, "im": …}`.
 ```julia
 using AirDB: to_JSON, from_JSON
 
-to_JSON(form("widget", 1, 2.5))   # "[[\"'widget\", 1, 2.5], {}]"
+to_JSON(form("widget", 1, 2.5))   # "[[\"'widget\", 1, 2.5], {}, false]"
+to_JSON(hold(form(a = 1)))        # "[[], {\":a\": 1}, true]" — the flag is last
 to_JSON(Form(5))                  # "5"
 to_JSON(Form("abc"))              # "\"'abc\""
 

@@ -150,10 +150,12 @@
         # other forms are unchanged
         @test hold(Form(5)) === Form(5)
         @test !isheld(Form(5))
-        # the flag is part of equality and hashing, but not of JSON
+        # the flag is part of equality, hashing, and the JSON encoding
         @test h != f
         @test !isequal(h, f)
-        @test AirDB.to_JSON(h) == AirDB.to_JSON(f)
+        @test AirDB.to_JSON(h) != AirDB.to_JSON(f)
+        @test endswith(AirDB.to_JSON(h), ", true]")
+        @test AirDB.from_JSON(AirDB.to_JSON(h)) == h   # it round-trips
     end
 
     @testset "sequence ranges" begin

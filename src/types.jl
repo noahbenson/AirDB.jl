@@ -82,8 +82,8 @@ struct FormContainer <: Form
     held::Bool
     # Suppress the generated constructor, as in the original: `FormContainer(a, b)`
     # must not capture two positional values. `held` is part of the container's
-    # value — a held form is not equal to an unheld one — but not of its JSON
-    # encoding.
+    # value — a held form is not equal to an unheld one — and it is written in the
+    # form's JSON.
     FormContainer(seq::FormSeq, map::FormMap, held::Bool = false) = new(seq, map, held)
 end
 

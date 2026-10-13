@@ -10,17 +10,17 @@
 
     @testset "encodings" begin
         # a string is marked with ', a symbol with :
-        @test to_JSON(form(:a, "b")) == "[[\":a\", \"'b\"], {}]"
+        @test to_JSON(form(:a, "b")) == "[[\":a\", \"'b\"], {}, false]"
         # a scalar form is just its leaf
         @test to_JSON(Form(5)) == "5"
         @test to_JSON(Form("abc")) == "\"'abc\""
         @test to_JSON(Form(nothing)) == "null"
         # a float always carries a point or exponent so it reads back as a float
-        @test to_JSON(form(3.0)) == "[[3.0], {}]"
+        @test to_JSON(form(3.0)) == "[[3.0], {}, false]"
         @test value(from_JSON(to_JSON(form(3.0)))[1]) === 3.0
         @test value(from_JSON("[[3], {}]")[1]) === Int64(3)
         # a complex number is always an object, even with a zero imaginary part
-        @test to_JSON(form(1 + 0im)) == "[[{\"re\": 1.0, \"im\": 0.0}], {}]"
+        @test to_JSON(form(1 + 0im)) == "[[{\"re\": 1.0, \"im\": 0.0}], {}, false]"
         @test value(from_JSON(to_JSON(form(1 + 0im)))[1]) === ComplexF64(1, 0)
         # a form is a two-element list; a bare object is a map-only form
         @test from_JSON("{\":a\": 1}") == form(a = 1)
@@ -29,6 +29,10 @@
         @test from_JSON("5") == Form(5)
         @test from_JSON("5") isa FormScalar
         @test from_JSON("\"'abc\"") == Form("abc")
+        # the held flag is written after the map, and round-trips
+        @test to_JSON(hold(form(a = 1))) == "[[], {\":a\": 1}, true]"
+        @test from_JSON(to_JSON(hold(form(a = 1)))) == hold(form(a = 1))
+        @test !isheld(from_JSON("[[], {\":a\": 1}]"))   # a two-element list is unheld
         # escapes and unicode
         @test from_JSON(to_JSON(form("a\nb\"c")))[1] == Form("a\nb\"c")
         @test from_JSON("[[\"'\\u0041\"], {}]")[1] == Form("A")

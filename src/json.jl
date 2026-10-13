@@ -1,9 +1,10 @@
 ################################################################################
 # json.jl
 #
-# The JSON codec for `Form`. A container is written as the two-element list
-# `[seq, map]`, with the symbol keys of the map as JSON strings, and a scalar form
-# as its bare leaf; that is what makes the format self-describing. Three encodings
+# The JSON codec for `Form`. A container is written as the three-element list
+# `[seq, map, held]`, with the symbol keys of the map as JSON strings and the
+# `held` flag last, and a scalar form as its bare leaf; that is what makes the
+# format self-describing. Three encodings
 # are worth stating because they are not forced by JSON itself:
 #
 #  * A `String` and a `Symbol` are both JSON strings, so the first character
@@ -67,7 +68,8 @@ function _jsonvalue(io::IO, x::ComplexF64)
 end
 
 function _jsonvalue(io::IO, fc::FormContainer)
-    # Two brackets: the form's own, then the seq array's.
+    # Two brackets: the form's own, then the seq array's. The map is followed by
+    # the `held` flag, so a held form round-trips.
     print(io, "[[")
     sep = ""
     for x in fc.seq
@@ -84,7 +86,7 @@ function _jsonvalue(io::IO, fc::FormContainer)
         print(io, ": ")
         _jsonvalue(io, fc.map[k])
     end
-    return print(io, "}]")
+    return print(io, "}, ", fc.held ? "true" : "false", "]")
 end
 
 # A scalar form is just its leaf.
@@ -93,9 +95,9 @@ _jsonvalue(io::IO, fs::FormScalar) = _jsonvalue(io, value(fs))
 """
     to_JSON(f::Form) -> String
 
-The form as a JSON string. A container is written as the two-element list
-`[seq, map]`, so the format is self-describing: `from_JSON` reads a list as a
-container and nothing else. A scalar form is written as its bare leaf.
+The form as a JSON string. A container is written as the three-element list
+`[seq, map, held]`, so the format is self-describing: `from_JSON` reads a list as
+a container and nothing else. A scalar form is written as its bare leaf.
 
 A `String` and a `Symbol` are both written as JSON strings, with the first
 character inside the quotes saying which: `'` for a string and `:` for a symbol.
@@ -375,9 +377,27 @@ function _parseform!(r::_JSONReader)
     seq = _parsearray!(r)
     _expect!(r, _BYTE_COMMA)
     pairs = _parseobject!(r)
+    # The `held` flag follows the map. A two-element list — an older payload, or
+    # one written by hand — leaves it false.
+    held = false
+    _skipws!(r)
+    if !_atend(r) && r.b[r.i] == _BYTE_COMMA
+        r.i += 1
+        held = _parseheld!(r)
+    end
     _expect!(r, _BYTE_RBRACKET)
     kv = Pair{Symbol,FormValue}[_parsekey(r, first(p)) => last(p) for p in pairs]
-    return FormContainer(FormSeq(seq), FormMap(kv))
+    return FormContainer(FormSeq(seq), FormMap(kv), held)
+end
+
+# The `held` boolean that follows a form's map.
+function _parseheld!(r::_JSONReader)
+    _skipws!(r)
+    _atend(r) && _jsonfail(r, "expected a boolean after the form's map")
+    c = r.b[r.i]
+    (c == UInt8('t')) && return _literal!(r, "true", true)
+    (c == UInt8('f')) && return _literal!(r, "false", false)
+    return _jsonfail(r, "expected a boolean after the form's map")
 end
 
 # Whether a two-key object is the `{"re": …, "im": …}` a complex number is
@@ -419,9 +439,9 @@ end
     from_JSON(db::Database, s::AbstractString) -> Form
 
 Reads a [`Form`](@ref) from the JSON that [`to_JSON`](@ref) writes. A container is
-a two-element list `[seq, map]`, and that is the only shape accepted as one; a
-bare object is accepted as a form with only a map, and a bare scalar as a scalar
-form, since both are convenient ways to write one by hand.
+a list `[seq, map, held]` — a two-element `[seq, map]` is accepted too, with `held`
+false; a bare object is accepted as a form with only a map, and a bare scalar as
+a scalar form, since both are convenient ways to write one by hand.
 
 A form may link to a [`VolatileForm`](@ref), written `"@<uuid>"`. Resolving such
 a link requires a database, so either pass one, or pass a function that turns a

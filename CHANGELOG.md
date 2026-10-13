@@ -30,7 +30,7 @@ The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
   `to_dict`.
 - **The `held` flag** on containers (and a leading colon on symbol scalar forms):
   `hold`, `unhold`, `isheld`. It is part of a form's equality and hashing — a
-  held form is not equal to an unheld one — but not of its JSON encoding.
+  held form is not equal to an unheld one — and it is written in the form's JSON.
 - **`VolatileForm`**, a `Form` with a stable UUID that persists itself on commit,
   loaded lazily and cached by id.
 - **`Database`**, configured with `DatabaseConfig` and created with

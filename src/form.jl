@@ -128,9 +128,9 @@ colon on its name unless it already has one, and any other form (a non-symbol
 scalar, a volatile) is returned unchanged. `unhold` undoes it, and `isheld` tests
 it.
 
-The flag is part of a form's value: a held form is not equal to an unheld one,
-and the two hash differently. It is *not* part of the JSON encoding, so a held
-form loaded from the database comes back unheld.
+The flag is part of a form's value: a held form is not equal to an unheld one, the
+two hash differently, and it is written in the form's JSON, so a held form
+round-trips through the database.
 
 # Examples
 ```julia
