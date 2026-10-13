@@ -81,8 +81,9 @@ struct FormContainer <: Form
     map::FormMap
     held::Bool
     # Suppress the generated constructor, as in the original: `FormContainer(a, b)`
-    # must not capture two positional values. `held` is metadata for tools built on
-    # AirDB; it takes no part in equality, hashing, or the JSON encoding.
+    # must not capture two positional values. `held` is part of the container's
+    # value — a held form is not equal to an unheld one — but not of its JSON
+    # encoding.
     FormContainer(seq::FormSeq, map::FormMap, held::Bool = false) = new(seq, map, held)
 end
 

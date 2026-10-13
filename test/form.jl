@@ -150,9 +150,9 @@
         # other forms are unchanged
         @test hold(Form(5)) === Form(5)
         @test !isheld(Form(5))
-        # the flag is invisible to equality, hashing, and JSON
-        @test h == f
-        @test hash(h) == hash(f)
+        # the flag is part of equality and hashing, but not of JSON
+        @test h != f
+        @test !isequal(h, f)
         @test AirDB.to_JSON(h) == AirDB.to_JSON(f)
     end
 

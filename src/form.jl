@@ -128,8 +128,9 @@ colon on its name unless it already has one, and any other form (a non-symbol
 scalar, a volatile) is returned unchanged. `unhold` undoes it, and `isheld` tests
 it.
 
-The flag is metadata for tools built on AirDB; it takes no part in equality,
-hashing, or the JSON encoding.
+The flag is part of a form's value: a held form is not equal to an unheld one,
+and the two hash differently. It is *not* part of the JSON encoding, so a held
+form loaded from the database comes back unheld.
 
 # Examples
 ```julia
@@ -248,15 +249,19 @@ delete(f::FormContainer, k::Symbol) = FormContainer(f.seq, delete(f.map, k))
 # ---- equality ----------------------------------------------------------------
 
 Base.:(==)(a::FormScalar, b::FormScalar) = a.value == b.value
-Base.:(==)(a::FormContainer, b::FormContainer) = a.seq == b.seq && a.map == b.map
+# `held` is part of the value: a held form is not equal to an unheld one.
+Base.:(==)(a::FormContainer, b::FormContainer) =
+    a.held == b.held && a.seq == b.seq && a.map == b.map
 Base.:(==)(::Form, ::Form) = false          # different concrete kinds of form
 
 Base.isequal(a::FormScalar, b::FormScalar) = isequal(a.value, b.value)
-Base.isequal(a::FormContainer, b::FormContainer) = isequal(a.seq, b.seq) && isequal(a.map, b.map)
+Base.isequal(a::FormContainer, b::FormContainer) =
+    a.held == b.held && isequal(a.seq, b.seq) && isequal(a.map, b.map)
 Base.isequal(::Form, ::Form) = false
 
 Base.hash(fs::FormScalar, h::UInt) = hash(fs.value, hash(:FormScalar, h))
-Base.hash(fc::FormContainer, h::UInt) = hash(fc.map, hash(fc.seq, hash(:FormContainer, h)))
+Base.hash(fc::FormContainer, h::UInt) =
+    hash(fc.held, hash(fc.map, hash(fc.seq, hash(:FormContainer, h))))
 
 # ---- printing ----------------------------------------------------------------
 

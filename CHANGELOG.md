@@ -29,8 +29,8 @@ The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
   `select_keys`, `filter`, `map_values`, `map_keys`, `deep_map`, `to_vector`,
   `to_dict`.
 - **The `held` flag** on containers (and a leading colon on symbol scalar forms):
-  `hold`, `unhold`, `isheld`. Metadata for tools built on AirDB; it takes no part
-  in equality, hashing, or JSON.
+  `hold`, `unhold`, `isheld`. It is part of a form's equality and hashing — a
+  held form is not equal to an unheld one — but not of its JSON encoding.
 - **`VolatileForm`**, a `Form` with a stable UUID that persists itself on commit,
   loaded lazily and cached by id.
 - **`Database`**, configured with `DatabaseConfig` and created with

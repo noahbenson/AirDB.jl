@@ -110,8 +110,9 @@ empty(f)           # Form() — the empty container
 
 A container carries a `held` flag, and a symbol scalar form carries the same idea
 as a leading colon on its name. `hold` sets it, `unhold` clears it, and `isheld`
-tests it. It is metadata for tools built on AirDB — it takes no part in equality,
-hashing, or the JSON encoding.
+tests it. It is part of a form's value — a held form is not equal to an unheld one
+— but not of its JSON encoding, so a held form loaded from the database comes
+back unheld.
 
 ```julia
 h = hold(form(a = 1))        # the same form, now held
