@@ -48,11 +48,15 @@ end
         id = _create_and_forget(db, n = 1)
         GC.gc(); GC.gc()   # let the cache release the form so the read hits the database
 
-        # close every pooled read connection so the next read fails
-        for _ in 1:cfg.readpoolsize
-            c = take!(db.readpool)
-            close(c)
-            put!(db.readpool, c)
+        # Break the schema so the next read fails with a database error (rather
+        # than a missing row). Closing the pool's connections is the obvious way
+        # to provoke one, but whether LibPQ raises on a closed connection — and
+        # when — differs between versions, so it is not reliable.
+        conn = _connect(cfg)
+        try
+            LibPQ.execute(conn, "DROP TABLE form_current CASCADE")
+        finally
+            close(conn)
         end
 
         # the read fails and, under :abort, fails the whole database
