@@ -14,6 +14,9 @@
     <loc>http://localhost:3000/forms</loc>
   </url>
   <url>
+    <loc>http://localhost:3000/externs</loc>
+  </url>
+  <url>
     <loc>http://localhost:3000/transactions</loc>
   </url>
   <url>
