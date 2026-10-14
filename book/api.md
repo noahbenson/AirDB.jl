@@ -111,6 +111,22 @@ AirDB.from_JSON(resolve, s)         -> Form            # resolve "@<uuid>" links
 AirDB.from_JSON(db, s)              -> Form            # resolve links via the database
 ```
 
+## Extern types
+
+```julia
+AbstractAirExtern                   # supertype of a host-level value a form can hold
+FormExtern(x)                       # the form wrapping one
+value(fe)                           # the extern back out
+
+serialize_extern(obj)               # provider: obj -> JSON-able payload (a method)
+deserialize_extern(::Val{name}, p)  # provider: payload -> obj (a method)
+register_extern(:name, T;           # register T under a symbol, with its equality
+                isequal = ===,      #   (a function, not a method: no piracy)
+                hash = ...)
+```
+
+See [Extern types](externs.md).
+
 ## Air re-exports
 
 AirDB builds on Air's transaction system, which you use directly:
@@ -128,3 +144,5 @@ using Air                  # @tx, tx, Volatile, Actor, send, ...
 | `BoundsError` | a missing sequence position, or an out-of-range append |
 | `FormNotFound` | loading a form whose id is not in the database |
 | `DatabaseError` | a database operation failed and the policy gave up |
+| `ExternError` | a form holds an extern type that is not registered |
+| `ExternTombstone` | an extern was written as a tombstone (`:abandoned`/`:expired`) |

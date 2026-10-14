@@ -7,6 +7,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Under `0.x`, SemVer puts breaking changes in the minor position and compatible
 fixes in the patch position, which is how the versions below are chosen.
 
+## [Unreleased]
+
+### Added
+
+- **Extern types**: a form can hold a host-level value that is not JSON itself — a
+  promise, a socket, a config handle — wrapped in a **`FormExtern`**. A provider
+  subclasses `AbstractAirExtern`, defines `serialize_extern`/`deserialize_extern`,
+  and registers the type with `register_extern(:name, T; isequal, hash)`. The
+  equality and hash are *functions given at registration* (defaulting to identity)
+  rather than methods on `FormExtern`, so a provider never commits type piracy.
+- An extern is stored as the tagged list `["extern", "<type>", <payload>]`, told
+  apart from a container by its first element (a tag string vs. a seq list).
+  Reading an unregistered type raises `ExternError`; a tombstone payload
+  (`:abandoned`/`:expired`) raises `ExternTombstone`.
+
 ## [0.1.0] - 2026-10-12
 
 The first release. AirDB builds a PostgreSQL-backed persistence layer on top of

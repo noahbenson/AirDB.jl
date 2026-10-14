@@ -6,6 +6,7 @@ using LibPQ
 
 include("helpers.jl")
 include("form.jl")
+include("externs.jl")
 include("json.jl")
 include("indexing.jl")
 include("verbs.jl")

@@ -24,17 +24,21 @@ value(widget[:n])                            # 42
 The pieces:
 
 - **`Form`** — an immutable, JSON-able nested value. A form is a `FormScalar` (a
-  bare leaf), a `FormContainer` (a sequence and a map), or a `VolatileForm`.
+  bare leaf), a `FormContainer` (a sequence and a map), a `VolatileForm`, or a
+  `FormExtern` (a host-level value that is not JSON itself).
 - **`VolatileForm`** — a `Form` with a stable UUID that persists itself when the
   transaction that changed it commits, loaded lazily and cached by id.
+- **`AbstractAirExtern`** — a host-level value a form can hold (a promise, a
+  socket, a config handle), stored through `serialize_extern`/`deserialize_extern`
+  and registered with `register_extern`.
 - **`Database`** — the connection, the single writer actor, the read pool, and
   the cache. `create_database` makes a new one; `open_database` opens an existing
   one; `MemoryDatabase` is a fake, in-memory one for tests.
 
 ## The written guide
 
-A narrative guide — getting started, forms, transactions, indexing, persistence,
-concurrency, and failures, with worked examples — is in the
+A narrative guide — getting started, forms, extern types, transactions, indexing,
+persistence, concurrency, and failures, with worked examples — is in the
 [book](https://noahbenson.github.io/AirDB.jl/book/).
 
 ## API reference

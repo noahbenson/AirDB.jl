@@ -10,6 +10,7 @@ project:
     - file: getting-started.md
     - file: named-forms.md
     - file: forms.md
+    - file: externs.md
     - file: transactions.md
     - file: indexing.md
     - file: persistence.md

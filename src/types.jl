@@ -28,6 +28,18 @@ that persists itself). The concrete kinds are gathered in [`FormNode`](@ref).
 abstract type Form end
 
 """
+    AbstractAirExtern
+
+The supertype of a host-level value a form can hold *without* being JSON itself —
+a promise, a socket, a configuration handle, a cached value. A form stores one
+inside a [`FormExtern`](@ref), which serializes it through
+[`serialize_extern`](@ref) and [`deserialize_extern`](@ref); the type must be
+registered with [`register_extern`](@ref) before a form holding it can be written
+or read.
+"""
+abstract type AbstractAirExtern end
+
+"""
     FormValue
 
 What a [`FormContainer`](@ref) holds directly: a [`Form`](@ref) or a
@@ -66,6 +78,19 @@ container wraps a leaf into one, so every value read out of a form is a form.
 Use [`value`](@ref) to get the leaf back.
 """
 struct FormScalar{T<:FormLeaf} <: Form
+    value::T
+end
+
+"""
+    FormExtern(value)
+
+A form holding a host-level [`AbstractAirExtern`](@ref): a value that cannot be
+written as JSON directly and is therefore stored through a provider's
+[`serialize_extern`](@ref)/[`deserialize_extern`](@ref). Build one with
+[`to_form`](@ref) or `FormExtern(x)`; use [`value`](@ref) to get the wrapped
+object back.
+"""
+struct FormExtern{T<:AbstractAirExtern} <: Form
     value::T
 end
 
@@ -130,16 +155,18 @@ The concrete kinds of form, as a `Union`. The operations that produce a form are
 typed to return this union rather than the abstract [`Form`](@ref), so the
 compiler keeps a scalar form inline instead of boxing it on every read.
 """
-const FormNode = Union{FormScalar,FormContainer,VolatileForm}
+const FormNode = Union{FormScalar,FormContainer,VolatileForm,FormExtern}
 
 # ---- shared operations -------------------------------------------------------
 
 """
     value(fs::FormScalar)
+    value(fe::FormExtern)
 
-The leaf a scalar form wraps.
+The leaf a scalar form wraps, or the extern object an extern form wraps.
 """
 value(fs::FormScalar) = fs.value
+value(fe::FormExtern) = fe.value
 
 Base.isequal(a::VolatileForm, b::VolatileForm) = a.id == b.id
 Base.:(==)(a::VolatileForm, b::VolatileForm) = a.id == b.id

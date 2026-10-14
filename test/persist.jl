@@ -110,6 +110,29 @@ end
             @test_throws FormNotFound get_form(db, uuid4())[]
         end
 
+        @testset "externs survive JSONB" begin
+            # The types are registered in test/externs.jl. JSONB reorders object
+            # keys and normalizes whitespace, so a round trip through PostgreSQL is
+            # a stronger test of the extern encoding than the string one.
+            vf = VolatileForm(db, cfg = ConfigHandle(7, "x"), n = 1)
+            AirDB.sync(db)
+            @test occursin("\"'extern\"", _current_payload(conn, vf.id))
+            # drop the in-memory copy and read it back from the database
+            id = vf.id
+            vf = nothing
+            GC.gc(); GC.gc()
+            r = get_form(db, id)[]
+            @test r[:cfg] isa FormExtern{ConfigHandle}
+            @test value(r[:cfg]) == ConfigHandle(7, "x")
+            @test r == form(cfg = ConfigHandle(7, "x"), n = 1)
+            # an update that changes only the extern round-trips too
+            vf2 = get_form(db, id)
+            @tx vf2[:cfg] = ConfigHandle(8, "y")
+            AirDB.sync(db)
+            r2 = get_form(db, id)[]
+            @test value(r2[:cfg]) == ConfigHandle(8, "y")
+        end
+
         @testset "concurrent writers" begin
             vf = VolatileForm(db, n = 0)
             AirDB.sync(db)

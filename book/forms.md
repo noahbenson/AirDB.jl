@@ -2,9 +2,10 @@
 
 A `Form` is an immutable, nested, JSON-able value. Every node in a form tree is a
 form: a **`FormScalar`** holds a single leaf, a **`FormContainer`** holds a
-sequence of positional values and a map of symbol-keyed ones, and a
+sequence of positional values and a map of symbol-keyed ones, a
 **`VolatileForm`** (see [Transactions](transactions.md)) holds a form that
-persists itself.
+persists itself, and a **`FormExtern`** (see [Extern types](externs.md)) holds a
+host-level value that is not JSON itself.
 
 ## Scalar forms
 
@@ -200,6 +201,9 @@ from_JSON("{\":a\": 1}")          # Form(a=1) — a bare object is a map-only fo
 A form may link to a `VolatileForm`, written `"@<uuid>"`. Reading such a link
 needs the database that owns it (see [Persistence](persistence.md)); without one
 it is an error.
+
+A form may also hold a `FormExtern`, written as the tagged list `["extern",
+"<type>", <payload>]`. See [Extern types](externs.md).
 
 ```julia
 from_JSON("[[\"@11111111-1111-1111-1111-111111111111\"], {}]")

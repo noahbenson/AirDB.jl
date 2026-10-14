@@ -40,6 +40,9 @@ function _formvalue(x::AbstractDict)
     pairs = Pair{Symbol,FormValue}[_formkey(k) => _store(v) for (k, v) in x]
     return FormContainer(FormSeq(), FormMap(pairs))
 end
+# A host-level extern is held as it is, wrapped so the tree stays closed: the
+# provider's `serialize_extern` runs only when the form is written.
+@inline _formvalue(x::AbstractAirExtern) = FormExtern(x)
 _formvalue(x) = _formerror(x, "it is not a value type this can represent")
 
 # A dictionary key must become a symbol for the map. Only the conversions that
