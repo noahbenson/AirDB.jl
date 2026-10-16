@@ -56,7 +56,8 @@ filter(pred, f); map_values(fn, f); map_keys(fn, f); deep_map(fn, f)
 to_vector(f); to_dict(f)    # convert out to ordinary Julia data
 
 hold(f); unhold(f)          # the `held` flag (containers, symbol scalars)
-isheld(f)
+isheld(f)                   # ... held: a container flag, or a leading ' on a symbol
+iskeyword(f); iswildcard(f) # ... a leading : or ? on a symbol (both inert)
 ```
 
 Reading and updating use ordinary indexing; see

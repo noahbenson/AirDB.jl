@@ -127,15 +127,32 @@ unhold(Form(Symbol("'abc"))) # Form(:abc)
 hold(Form(5))                # Form(5) — other forms are returned unchanged
 ```
 
-A symbol that begins with a colon is a **keyword**, and a keyword is a different,
-inert leaf: holding one is the keyword, so `hold` and `unhold` leave it exactly as
-it is, and `isheld` does not count it as held.
+A symbol that begins with a colon is a **keyword** and one that begins with a
+question mark is a **wildcard**. Both are *inert*: they are already their own
+value, so holding one is a no-op — `hold` and `unhold` leave them exactly as they
+are, and `isheld` does not count them as held.
 
 ```julia
 hold(Form(Symbol(":abc")))     # unchanged — a keyword is inert
 unhold(Form(Symbol(":abc")))   # unchanged — a keyword never unholds
 isheld(Form(Symbol(":abc")))   # false — a keyword is not a held symbol
-Form(Symbol(":abc"))           # not equal to Form(Symbol("'abc"))
+
+hold(Form(Symbol("?abc")))     # unchanged — a wildcard is inert
+isheld(Form(Symbol("?abc")))   # false
+
+Form(Symbol(":abc"))           # not equal to Form(Symbol("'abc")) or Form(Symbol("?abc"))
+```
+
+Three predicates classify a symbol leaf: `isheld` (a leading `'`), `iskeyword` (a
+leading `:`), and `iswildcard` (a leading `?`). Holding a symbol is a no-op
+exactly when one of them is true.
+
+```julia
+isheld(Form(Symbol("'abc")))     # true
+iskeyword(Form(Symbol(":abc")))  # true
+iswildcard(Form(Symbol("?abc"))) # true
+isheld(Form(:abc))               # false — a plain symbol
+iswildcard(Form(Symbol(":abc"))) # false
 ```
 
 ## Updating

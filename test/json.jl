@@ -41,10 +41,13 @@
         @test to_JSON(Form(:abc)) == "\":abc\""
         @test to_JSON(Form(Symbol(":abc"))) == "\"::abc\""
         @test to_JSON(Form(Symbol("'abc"))) == "\":'abc\""
+        @test to_JSON(Form(Symbol("?abc"))) == "\":?abc\""
         @test from_JSON(to_JSON(Form(Symbol("'abc")))) == Form(Symbol("'abc"))
         @test from_JSON(to_JSON(Form(Symbol(":abc")))) == Form(Symbol(":abc"))
+        @test from_JSON(to_JSON(Form(Symbol("?abc")))) == Form(Symbol("?abc"))
         @test isheld(from_JSON(to_JSON(Form(Symbol("'abc")))))
         @test !isheld(from_JSON(to_JSON(Form(Symbol(":abc")))))
+        @test !isheld(from_JSON(to_JSON(Form(Symbol("?abc")))))
     end
 
     @testset "form links" begin

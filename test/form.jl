@@ -152,6 +152,34 @@
         @test unhold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))
         @test !isheld(Form(Symbol(":abc")))
         @test Form(Symbol(":abc")) != Form(Symbol("'abc"))
+        # a leading question mark is a wildcard: also inert, and also distinct
+        @test hold(Form(Symbol("?abc"))) === Form(Symbol("?abc"))
+        @test unhold(Form(Symbol("?abc"))) === Form(Symbol("?abc"))
+        @test !isheld(Form(Symbol("?abc")))
+        @test Form(Symbol("?abc")) != Form(Symbol("'abc"))
+        @test Form(Symbol("?abc")) != Form(Symbol(":abc"))
+        @test hold(Form(Symbol("?abc"))) != Form(Symbol("'?abc"))   # the no-op is real
+        # a `?` that is not leading is ordinary text
+        @test hold(Form(Symbol("a?b"))) == Form(Symbol("'a?b"))
+        # iskeyword / iswildcard classify the symbol leaves
+        @test iskeyword(Form(Symbol(":abc")))
+        @test !iskeyword(Form(:abc))
+        @test !iskeyword(Form(Symbol("'abc")))
+        @test !iskeyword(Form(Symbol("?abc")))
+        @test !iskeyword(Form(5))
+        @test !iskeyword(form(a = 1))
+        @test iswildcard(Form(Symbol("?abc")))
+        @test !iswildcard(Form(:abc))
+        @test !iswildcard(Form(Symbol(":abc")))
+        @test !iswildcard(Form(Symbol("'abc")))
+        @test !iswildcard(Form(5))
+        @test !iswildcard(form(a = 1))
+        # holding is a no-op exactly when the symbol is already its own value
+        for s in (:abc, Symbol(":abc"), Symbol("?abc"), Symbol("'abc"), Symbol("a?b"),
+                  Symbol("a:b"))
+            f = Form(s)
+            @test (hold(f) === f) == (isheld(f) || iskeyword(f) || iswildcard(f))
+        end
         # other forms are unchanged
         @test hold(Form(5)) === Form(5)
         @test !isheld(Form(5))

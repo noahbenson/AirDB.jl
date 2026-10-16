@@ -135,9 +135,10 @@ The flag is part of a form's value: a held form is not equal to an unheld one, t
 two hash differently, and it is written in the form's JSON, so a held form
 round-trips through the database.
 
-A symbol that already begins with `:` is a **keyword**, which is a different,
-inert leaf: `hold` and `unhold` leave it exactly as it is, and `isheld` does not
-count it as held.
+A symbol that already begins with `:` or `?` is **inert** — a keyword or a
+wildcard — and is a different leaf from a held symbol. Holding one is a no-op,
+because it is already its own value: `hold` and `unhold` leave it exactly as it
+is, and `isheld` does not count it as held.
 
 # Examples
 ```julia
@@ -145,6 +146,7 @@ hold(form(a = 1))           # the same form, now held
 hold(Form(:abc))            # Form(:abc) with a leading quote: Form(Symbol("'abc"))
 hold(Form(Symbol("'abc")))  # unchanged — quotes do not stack
 hold(Form(Symbol(":abc")))  # unchanged — a keyword is inert
+hold(Form(Symbol("?abc")))  # unchanged — a wildcard is inert
 ```
 """
 function hold(f::FormContainer)
@@ -152,9 +154,10 @@ function hold(f::FormContainer)
     return FormContainer(f.seq, f.map, true)
 end
 function hold(fs::FormScalar{Symbol})
-    s = string(value(fs))
-    (startswith(s, "'") || startswith(s, ":")) && return fs
-    return FormScalar(Symbol("'", s))
+    # A held symbol, a keyword and a wildcard are all already their own value, so
+    # holding one leaves it alone: `':abc` is `:abc`, and `'?abc` is `?abc`.
+    (isheld(fs) || iskeyword(fs) || iswildcard(fs)) && return fs
+    return FormScalar(Symbol("'", string(value(fs))))
 end
 hold(f::Form) = f
 
@@ -162,8 +165,8 @@ hold(f::Form) = f
     unhold(f) -> Form
 
 Undoes [`hold`](@ref): clears a container's `held` flag, or strips a symbol
-scalar form's leading `'`. A keyword (a symbol beginning with `:`) and any other
-form are returned unchanged.
+scalar form's leading `'`. An inert symbol (a keyword, beginning with `:`, or a
+wildcard, beginning with `?`) and any other form are returned unchanged.
 """
 function unhold(f::FormContainer)
     f.held || return f
@@ -180,12 +183,37 @@ unhold(f::Form) = f
     isheld(f) -> Bool
 
 Whether `f` is held — a container with `held = true`, or a symbol scalar form
-whose name starts with `'`. A keyword (a symbol beginning with `:`) is not held,
-and neither is any other form. See [`hold`](@ref).
+whose name starts with `'`. An inert symbol (a keyword beginning with `:`, or a
+wildcard beginning with `?`) is not held, and neither is any other form. See
+[`hold`](@ref), [`iskeyword`](@ref), [`iswildcard`](@ref).
 """
 isheld(f::FormContainer) = f.held
 isheld(fs::FormScalar{Symbol}) = startswith(string(value(fs)), "'")
 isheld(::Form) = false
+
+"""
+    iskeyword(f) -> Bool
+
+Whether `f` is a keyword — a symbol scalar form whose name begins with `:`, such
+as `Form(Symbol(":abc"))`. A keyword is a distinct leaf that is already its own
+value, so [`hold`](@ref) and [`unhold`](@ref) leave it alone and [`isheld`](@ref)
+does not count it as held. Any other form is not a keyword. See
+[`iswildcard`](@ref).
+"""
+iskeyword(fs::FormScalar{Symbol}) = startswith(string(value(fs)), ":")
+iskeyword(::Form) = false
+
+"""
+    iswildcard(f) -> Bool
+
+Whether `f` is a wildcard — a symbol scalar form whose name begins with `?`, such
+as `Form(Symbol("?abc"))`. Like a keyword, a wildcard is a distinct leaf that is
+already its own value, so [`hold`](@ref) and [`unhold`](@ref) leave it alone and
+[`isheld`](@ref) does not count it as held. Any other form is not a wildcard. See
+[`iskeyword`](@ref).
+"""
+iswildcard(fs::FormScalar{Symbol}) = startswith(string(value(fs)), "?")
+iswildcard(::Form) = false
 
 # ---- the canonical order -----------------------------------------------------
 
@@ -310,4 +338,4 @@ Base.show(io::IO, fs::FormScalar) = (print(io, "Form("); _showvalue(io, fs); pri
 Base.show(io::IO, fc::FormContainer) = (print(io, "Form("); _showcontents(io, fc); print(io, ")"))
 
 export Form, FormScalar, FormContainer, FormLeaf, FormValue, form, to_form, value,
-    hold, unhold, isheld
+    hold, unhold, isheld, iskeyword, iswildcard

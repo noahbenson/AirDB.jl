@@ -13,12 +13,16 @@ fixes in the patch position, which is how the versions below are chosen.
 
 - **The held-symbol marker is now `'`, not `:`.** A held symbol scalar form
   carries a leading quote — `hold(Form(:abc))` is `Form(Symbol("'abc"))`, and
-  `unhold` strips it — and a symbol that begins with `:` is now a **keyword**: a
-  distinct, inert leaf that `hold` and `unhold` leave alone and `isheld` reports
-  as not held. The container `held` flag is unchanged.
+  `unhold` strips it — and a symbol that begins with `:` (a **keyword**) or `?`
+  (a **wildcard**) is *inert*: a distinct leaf that `hold` and `unhold` leave
+  alone and `isheld` reports as not held. The container `held` flag is unchanged.
 
   This is a change to what a stored symbol means: a symbol written by the old
   convention reads back as a keyword rather than as a held symbol.
+- **`iskeyword(f)` and `iswildcard(f)`**, which test whether a symbol scalar form
+  is a keyword (a leading `:`) or a wildcard (a leading `?`), alongside the
+  existing `isheld` (a leading `'`). Holding a symbol is a no-op exactly when one
+  of the three is true.
 
 ### Added
 
