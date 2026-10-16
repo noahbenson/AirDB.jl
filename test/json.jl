@@ -36,6 +36,15 @@
         # escapes and unicode
         @test from_JSON(to_JSON(form("a\nb\"c")))[1] == Form("a\nb\"c")
         @test from_JSON("[[\"'\\u0041\"], {}]")[1] == Form("A")
+        # a held symbol and a keyword are distinct leaves, and each round-trips:
+        # the marker is the first character, so the ' is part of the symbol's text
+        @test to_JSON(Form(:abc)) == "\":abc\""
+        @test to_JSON(Form(Symbol(":abc"))) == "\"::abc\""
+        @test to_JSON(Form(Symbol("'abc"))) == "\":'abc\""
+        @test from_JSON(to_JSON(Form(Symbol("'abc")))) == Form(Symbol("'abc"))
+        @test from_JSON(to_JSON(Form(Symbol(":abc")))) == Form(Symbol(":abc"))
+        @test isheld(from_JSON(to_JSON(Form(Symbol("'abc")))))
+        @test !isheld(from_JSON(to_JSON(Form(Symbol(":abc")))))
     end
 
     @testset "form links" begin

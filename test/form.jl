@@ -141,12 +141,17 @@
         @test h === hold(h)              # idempotent
         @test !isheld(unhold(h))
         @test unhold(f) === f            # unholding an unheld form is a no-op
-        # a symbol scalar form carries the flag in a leading colon
-        @test hold(Form(:abc)) == Form(Symbol(":abc"))
+        # a symbol scalar form carries the flag in a leading quote
+        @test hold(Form(:abc)) == Form(Symbol("'abc"))
         @test isheld(hold(Form(:abc)))
-        @test hold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))    # colons do not stack
-        @test unhold(Form(Symbol(":abc"))) == Form(:abc)
+        @test hold(Form(Symbol("'abc"))) === Form(Symbol("'abc"))    # quotes do not stack
+        @test unhold(Form(Symbol("'abc"))) == Form(:abc)
         @test unhold(Form(:abc)) === Form(:abc)
+        # a leading colon is a keyword: a different, inert leaf
+        @test hold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))
+        @test unhold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))
+        @test !isheld(Form(Symbol(":abc")))
+        @test Form(Symbol(":abc")) != Form(Symbol("'abc"))
         # other forms are unchanged
         @test hold(Form(5)) === Form(5)
         @test !isheld(Form(5))

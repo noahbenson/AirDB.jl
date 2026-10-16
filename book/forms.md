@@ -110,7 +110,7 @@ empty(f)           # Form() — the empty container
 ## The `held` flag
 
 A container carries a `held` flag, and a symbol scalar form carries the same idea
-as a leading colon on its name. `hold` sets it, `unhold` clears it, and `isheld`
+as a leading quote on its name. `hold` sets it, `unhold` clears it, and `isheld`
 tests it. It is part of a form's value — a held form is not equal to an unheld one
 — and it is written in the form's JSON, so a held form round-trips through the
 database.
@@ -120,11 +120,22 @@ h = hold(form(a = 1))        # the same form, now held
 isheld(h)                    # true
 hold(h) === h                # idempotent
 
-hold(Form(:abc))             # Form(Symbol(":abc")) — a leading colon
-hold(Form(Symbol(":abc")))   # unchanged — colons do not stack
-unhold(Form(Symbol(":abc"))) # Form(:abc)
+hold(Form(:abc))             # Form(Symbol("'abc")) — a leading quote
+hold(Form(Symbol("'abc")))   # unchanged — quotes do not stack
+unhold(Form(Symbol("'abc"))) # Form(:abc)
 
 hold(Form(5))                # Form(5) — other forms are returned unchanged
+```
+
+A symbol that begins with a colon is a **keyword**, and a keyword is a different,
+inert leaf: holding one is the keyword, so `hold` and `unhold` leave it exactly as
+it is, and `isheld` does not count it as held.
+
+```julia
+hold(Form(Symbol(":abc")))     # unchanged — a keyword is inert
+unhold(Form(Symbol(":abc")))   # unchanged — a keyword never unholds
+isheld(Form(Symbol(":abc")))   # false — a keyword is not a held symbol
+Form(Symbol(":abc"))           # not equal to Form(Symbol("'abc"))
 ```
 
 ## Updating

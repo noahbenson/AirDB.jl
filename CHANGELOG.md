@@ -9,6 +9,17 @@ fixes in the patch position, which is how the versions below are chosen.
 
 ## [Unreleased]
 
+### Changed
+
+- **The held-symbol marker is now `'`, not `:`.** A held symbol scalar form
+  carries a leading quote — `hold(Form(:abc))` is `Form(Symbol("'abc"))`, and
+  `unhold` strips it — and a symbol that begins with `:` is now a **keyword**: a
+  distinct, inert leaf that `hold` and `unhold` leave alone and `isheld` reports
+  as not held. The container `held` flag is unchanged.
+
+  This is a change to what a stored symbol means: a symbol written by the old
+  convention reads back as a keyword rather than as a held symbol.
+
 ### Added
 
 - **Extern types**: a form can hold a host-level value that is not JSON itself — a

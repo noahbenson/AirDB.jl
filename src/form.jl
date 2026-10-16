@@ -127,7 +127,7 @@ end
 
 `hold(f)` marks a form as held. A container gets `held = true` — a copy when it
 was not already held, `f` itself when it was — a symbol scalar form gets a leading
-colon on its name unless it already has one, and any other form (a non-symbol
+`'` on its name unless it already has one, and any other form (a non-symbol
 scalar, a volatile) is returned unchanged. `unhold` undoes it, and `isheld` tests
 it.
 
@@ -135,11 +135,16 @@ The flag is part of a form's value: a held form is not equal to an unheld one, t
 two hash differently, and it is written in the form's JSON, so a held form
 round-trips through the database.
 
+A symbol that already begins with `:` is a **keyword**, which is a different,
+inert leaf: `hold` and `unhold` leave it exactly as it is, and `isheld` does not
+count it as held.
+
 # Examples
 ```julia
-hold(form(a = 1))          # the same form, now held
-hold(Form(:abc))           # Form(:abc) with a leading colon: Form(Symbol(":abc"))
-hold(Form(Symbol(":abc"))) # unchanged — colons do not stack
+hold(form(a = 1))           # the same form, now held
+hold(Form(:abc))            # Form(:abc) with a leading quote: Form(Symbol("'abc"))
+hold(Form(Symbol("'abc")))  # unchanged — quotes do not stack
+hold(Form(Symbol(":abc")))  # unchanged — a keyword is inert
 ```
 """
 function hold(f::FormContainer)
@@ -147,8 +152,9 @@ function hold(f::FormContainer)
     return FormContainer(f.seq, f.map, true)
 end
 function hold(fs::FormScalar{Symbol})
-    startswith(string(value(fs)), ":") && return fs
-    return FormScalar(Symbol(":", value(fs)))
+    s = string(value(fs))
+    (startswith(s, "'") || startswith(s, ":")) && return fs
+    return FormScalar(Symbol("'", s))
 end
 hold(f::Form) = f
 
@@ -156,7 +162,8 @@ hold(f::Form) = f
     unhold(f) -> Form
 
 Undoes [`hold`](@ref): clears a container's `held` flag, or strips a symbol
-scalar form's leading colon. Any other form is returned unchanged.
+scalar form's leading `'`. A keyword (a symbol beginning with `:`) and any other
+form are returned unchanged.
 """
 function unhold(f::FormContainer)
     f.held || return f
@@ -164,7 +171,7 @@ function unhold(f::FormContainer)
 end
 function unhold(fs::FormScalar{Symbol})
     s = string(value(fs))
-    startswith(s, ":") || return fs
+    startswith(s, "'") || return fs
     return FormScalar(Symbol(SubString(s, nextind(s, 1))))
 end
 unhold(f::Form) = f
@@ -173,10 +180,11 @@ unhold(f::Form) = f
     isheld(f) -> Bool
 
 Whether `f` is held — a container with `held = true`, or a symbol scalar form
-whose name starts with a colon. Any other form is not held. See [`hold`](@ref).
+whose name starts with `'`. A keyword (a symbol beginning with `:`) is not held,
+and neither is any other form. See [`hold`](@ref).
 """
 isheld(f::FormContainer) = f.held
-isheld(fs::FormScalar{Symbol}) = startswith(string(value(fs)), ":")
+isheld(fs::FormScalar{Symbol}) = startswith(string(value(fs)), "'")
 isheld(::Form) = false
 
 # ---- the canonical order -----------------------------------------------------
