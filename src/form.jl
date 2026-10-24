@@ -94,10 +94,9 @@ function Form(x)::FormNode
         _formerror(x, "it is not a single leaf; use to_form or form to build a container")
     return FormScalar(v)
 end
-Form(seq::PVector, map::PDict; held::Bool = false) = FormContainer(
+Form(seq::PVector, map::PDict) = FormContainer(
     FormSeq(FormValue[_store(x) for x in seq]),
     FormMap(Pair{Symbol,FormValue}[_formkey(k) => _store(v) for (k, v) in map]),
-    held,
 )
 
 """
@@ -118,86 +117,13 @@ function form(args...; kwargs...)
     return FormContainer(seq, map)
 end
 
-# ---- the held flag -----------------------------------------------------------
-
-"""
-    hold(f) -> Form
-    unhold(f) -> Form
-    isheld(f) -> Bool
-
-`hold(f)` marks a form as held. A container gets `held = true` — a copy when it
-was not already held, `f` itself when it was — a symbol scalar form gets a leading
-`'` on its name unless it already has one, and any other form (a non-symbol
-scalar, a volatile) is returned unchanged. `unhold` undoes it, and `isheld` tests
-it.
-
-The flag is part of a form's value: a held form is not equal to an unheld one, the
-two hash differently, and it is written in the form's JSON, so a held form
-round-trips through the database.
-
-A symbol that already begins with `:` or `?` is **inert** — a keyword or a
-wildcard — and is a different leaf from a held symbol. Holding one is a no-op,
-because it is already its own value: `hold` and `unhold` leave it exactly as it
-is, and `isheld` does not count it as held.
-
-# Examples
-```julia
-hold(form(a = 1))           # the same form, now held
-hold(Form(:abc))            # Form(:abc) with a leading quote: Form(Symbol("'abc"))
-hold(Form(Symbol("'abc")))  # unchanged — quotes do not stack
-hold(Form(Symbol(":abc")))  # unchanged — a keyword is inert
-hold(Form(Symbol("?abc")))  # unchanged — a wildcard is inert
-```
-"""
-function hold(f::FormContainer)
-    f.held && return f
-    return FormContainer(f.seq, f.map, true)
-end
-function hold(fs::FormScalar{Symbol})
-    # A held symbol, a keyword and a wildcard are all already their own value, so
-    # holding one leaves it alone: `':abc` is `:abc`, and `'?abc` is `?abc`.
-    (isheld(fs) || iskeyword(fs) || iswildcard(fs)) && return fs
-    return FormScalar(Symbol("'", string(value(fs))))
-end
-hold(f::Form) = f
-
-"""
-    unhold(f) -> Form
-
-Undoes [`hold`](@ref): clears a container's `held` flag, or strips a symbol
-scalar form's leading `'`. An inert symbol (a keyword, beginning with `:`, or a
-wildcard, beginning with `?`) and any other form are returned unchanged.
-"""
-function unhold(f::FormContainer)
-    f.held || return f
-    return FormContainer(f.seq, f.map, false)
-end
-function unhold(fs::FormScalar{Symbol})
-    s = string(value(fs))
-    startswith(s, "'") || return fs
-    return FormScalar(Symbol(SubString(s, nextind(s, 1))))
-end
-unhold(f::Form) = f
-
-"""
-    isheld(f) -> Bool
-
-Whether `f` is held — a container with `held = true`, or a symbol scalar form
-whose name starts with `'`. An inert symbol (a keyword beginning with `:`, or a
-wildcard beginning with `?`) is not held, and neither is any other form. See
-[`hold`](@ref), [`iskeyword`](@ref), [`iswildcard`](@ref).
-"""
-isheld(f::FormContainer) = f.held
-isheld(fs::FormScalar{Symbol}) = startswith(string(value(fs)), "'")
-isheld(::Form) = false
+# ---- keywords and wildcards --------------------------------------------------
 
 """
     iskeyword(f) -> Bool
 
 Whether `f` is a keyword — a symbol scalar form whose name begins with `:`, such
-as `Form(Symbol(":abc"))`. A keyword is a distinct leaf that is already its own
-value, so [`hold`](@ref) and [`unhold`](@ref) leave it alone and [`isheld`](@ref)
-does not count it as held. Any other form is not a keyword. See
+as `Form(Symbol(":abc"))`. Any other form is not a keyword. See
 [`iswildcard`](@ref).
 """
 iskeyword(fs::FormScalar{Symbol}) = startswith(string(value(fs)), ":")
@@ -207,9 +133,7 @@ iskeyword(::Form) = false
     iswildcard(f) -> Bool
 
 Whether `f` is a wildcard — a symbol scalar form whose name begins with `?`, such
-as `Form(Symbol("?abc"))`. Like a keyword, a wildcard is a distinct leaf that is
-already its own value, so [`hold`](@ref) and [`unhold`](@ref) leave it alone and
-[`isheld`](@ref) does not count it as held. Any other form is not a wildcard. See
+as `Form(Symbol("?abc"))`. Any other form is not a wildcard. See
 [`iskeyword`](@ref).
 """
 iswildcard(fs::FormScalar{Symbol}) = startswith(string(value(fs)), "?")
@@ -288,19 +212,17 @@ delete(f::FormContainer, k::Symbol) = FormContainer(f.seq, delete(f.map, k))
 # ---- equality ----------------------------------------------------------------
 
 Base.:(==)(a::FormScalar, b::FormScalar) = a.value == b.value
-# `held` is part of the value: a held form is not equal to an unheld one.
-Base.:(==)(a::FormContainer, b::FormContainer) =
-    a.held == b.held && a.seq == b.seq && a.map == b.map
+Base.:(==)(a::FormContainer, b::FormContainer) = a.seq == b.seq && a.map == b.map
 Base.:(==)(::Form, ::Form) = false          # different concrete kinds of form
 
 Base.isequal(a::FormScalar, b::FormScalar) = isequal(a.value, b.value)
 Base.isequal(a::FormContainer, b::FormContainer) =
-    a.held == b.held && isequal(a.seq, b.seq) && isequal(a.map, b.map)
+    isequal(a.seq, b.seq) && isequal(a.map, b.map)
 Base.isequal(::Form, ::Form) = false
 
 Base.hash(fs::FormScalar, h::UInt) = hash(fs.value, hash(:FormScalar, h))
 Base.hash(fc::FormContainer, h::UInt) =
-    hash(fc.held, hash(fc.map, hash(fc.seq, hash(:FormContainer, h))))
+    hash(fc.map, hash(fc.seq, hash(:FormContainer, h)))
 
 # ---- printing ----------------------------------------------------------------
 
@@ -338,4 +260,4 @@ Base.show(io::IO, fs::FormScalar) = (print(io, "Form("); _showvalue(io, fs); pri
 Base.show(io::IO, fc::FormContainer) = (print(io, "Form("); _showcontents(io, fc); print(io, ")"))
 
 export Form, FormScalar, FormContainer, FormLeaf, FormValue, form, to_form, value,
-    hold, unhold, isheld, iskeyword, iswildcard
+    iskeyword, iswildcard

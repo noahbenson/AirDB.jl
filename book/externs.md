@@ -54,9 +54,9 @@ the two never collide.
 using AirDB: to_JSON, from_JSON
 
 to_JSON(FormExtern(ConfigHandle(2, "abc")))
-# "[\"'extern\", \":config\", [[], {\":label\": \"'abc\", \":version\": 2}, false]]"
+# "[\"'extern\", \":config\", [[], {\":label\": \"'abc\", \":version\": 2}]]"
 
-from_JSON("[\"'extern\", \":config\", [[], {\":label\": \"'abc\", \":version\": 2}, false]]")
+from_JSON("[\"'extern\", \":config\", [[], {\":label\": \"'abc\", \":version\": 2}]]")
 # FormExtern(ConfigHandle(2, "abc"))
 ```
 

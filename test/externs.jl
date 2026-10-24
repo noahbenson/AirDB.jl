@@ -51,7 +51,7 @@ AirDB.serialize_extern(o::UnregisteredHandle) = o.n
         # a map payload goes through the ordinary form encoding
         x = ConfigHandle(2, "b")
         s = AirDB.to_JSON(FormExtern(x))
-        @test s == "[\"'extern\", \":config\", [[], {\":label\": \"'b\", \":version\": 2}, false]]"
+        @test s == "[\"'extern\", \":config\", [[], {\":label\": \"'b\", \":version\": 2}]]"
         @test AirDB.from_JSON(s) == FormExtern(x)
         # a scalar payload is written as the bare leaf
         @test AirDB.to_JSON(FormExtern(OpaqueHandle(7))) == "[\"'extern\", \":opaque\", 7]"

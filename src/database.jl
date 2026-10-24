@@ -8,7 +8,10 @@
 # MIT License
 # Copyright (c) 2020-2026 Noah C. Benson
 
-const _SCHEMA_VERSION = "2"
+# Bumped to 3 when the `held` flag was removed from the form encoding: a stored
+# payload is now the two-element `[seq, map]`, so a database written by an earlier
+# version cannot be read and is refused at open time rather than failing per row.
+const _SCHEMA_VERSION = "3"
 
 const _DDL_STATEMENTS = [
     """

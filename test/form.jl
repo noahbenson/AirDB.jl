@@ -133,62 +133,29 @@
         @test empty(Form(5)) == form()
     end
 
-    @testset "the held flag" begin
-        f = form(a = 1)
-        h = hold(f)
-        @test isheld(h)
-        @test !isheld(f)
-        @test h === hold(h)              # idempotent
-        @test !isheld(unhold(h))
-        @test unhold(f) === f            # unholding an unheld form is a no-op
-        # a symbol scalar form carries the flag in a leading quote
-        @test hold(Form(:abc)) == Form(Symbol("'abc"))
-        @test isheld(hold(Form(:abc)))
-        @test hold(Form(Symbol("'abc"))) === Form(Symbol("'abc"))    # quotes do not stack
-        @test unhold(Form(Symbol("'abc"))) == Form(:abc)
-        @test unhold(Form(:abc)) === Form(:abc)
-        # a leading colon is a keyword: a different, inert leaf
-        @test hold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))
-        @test unhold(Form(Symbol(":abc"))) === Form(Symbol(":abc"))
-        @test !isheld(Form(Symbol(":abc")))
-        @test Form(Symbol(":abc")) != Form(Symbol("'abc"))
-        # a leading question mark is a wildcard: also inert, and also distinct
-        @test hold(Form(Symbol("?abc"))) === Form(Symbol("?abc"))
-        @test unhold(Form(Symbol("?abc"))) === Form(Symbol("?abc"))
-        @test !isheld(Form(Symbol("?abc")))
-        @test Form(Symbol("?abc")) != Form(Symbol("'abc"))
-        @test Form(Symbol("?abc")) != Form(Symbol(":abc"))
-        @test hold(Form(Symbol("?abc"))) != Form(Symbol("'?abc"))   # the no-op is real
-        # a `?` that is not leading is ordinary text
-        @test hold(Form(Symbol("a?b"))) == Form(Symbol("'a?b"))
+    @testset "keywords and wildcards" begin
         # iskeyword / iswildcard classify the symbol leaves
         @test iskeyword(Form(Symbol(":abc")))
         @test !iskeyword(Form(:abc))
-        @test !iskeyword(Form(Symbol("'abc")))
         @test !iskeyword(Form(Symbol("?abc")))
         @test !iskeyword(Form(5))
         @test !iskeyword(form(a = 1))
         @test iswildcard(Form(Symbol("?abc")))
         @test !iswildcard(Form(:abc))
         @test !iswildcard(Form(Symbol(":abc")))
-        @test !iswildcard(Form(Symbol("'abc")))
         @test !iswildcard(Form(5))
         @test !iswildcard(form(a = 1))
-        # holding is a no-op exactly when the symbol is already its own value
-        for s in (:abc, Symbol(":abc"), Symbol("?abc"), Symbol("'abc"), Symbol("a?b"),
-                  Symbol("a:b"))
-            f = Form(s)
-            @test (hold(f) === f) == (isheld(f) || iskeyword(f) || iswildcard(f))
-        end
-        # other forms are unchanged
-        @test hold(Form(5)) === Form(5)
-        @test !isheld(Form(5))
-        # the flag is part of equality, hashing, and the JSON encoding
-        @test h != f
-        @test !isequal(h, f)
-        @test AirDB.to_JSON(h) != AirDB.to_JSON(f)
-        @test endswith(AirDB.to_JSON(h), ", true]")
-        @test AirDB.from_JSON(AirDB.to_JSON(h)) == h   # it round-trips
+        # only a leading marker counts
+        @test !iskeyword(Form(Symbol("a:b")))
+        @test !iswildcard(Form(Symbol("a?b")))
+        # a keyword and a wildcard are distinct leaves
+        @test Form(Symbol(":abc")) != Form(Symbol("?abc"))
+        @test Form(Symbol(":abc")) != Form(:abc)
+        @test Form(Symbol("?abc")) != Form(:abc)
+        # and they carry through a container and its equality
+        @test iskeyword(form(a = Form(Symbol(":k")))[:a])
+        @test form(a = Form(Symbol("?k"))) == form(a = Form(Symbol("?k")))
+        @test form(a = Form(Symbol("?k"))) != form(a = Form(Symbol(":k")))
     end
 
     @testset "sequence ranges" begin

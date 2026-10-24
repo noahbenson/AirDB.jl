@@ -9,22 +9,21 @@ fixes in the patch position, which is how the versions below are chosen.
 
 ## [Unreleased]
 
-### Changed
+### Removed
 
-- **The held-symbol marker is now `'`, not `:`.** A held symbol scalar form
-  carries a leading quote — `hold(Form(:abc))` is `Form(Symbol("'abc"))`, and
-  `unhold` strips it — and a symbol that begins with `:` (a **keyword**) or `?`
-  (a **wildcard**) is *inert*: a distinct leaf that `hold` and `unhold` leave
-  alone and `isheld` reports as not held. The container `held` flag is unchanged.
+- **The `held` flag.** Forms no longer carry a held/unheld distinction: the
+  `FormContainer` field, `hold`/`unhold`/`isheld`, and the trailing JSON element
+  are all gone. A container is now written as the two-element list `[seq, map]`.
 
-  This is a change to what a stored symbol means: a symbol written by the old
-  convention reads back as a keyword rather than as a held symbol.
-- **`iskeyword(f)` and `iswildcard(f)`**, which test whether a symbol scalar form
-  is a keyword (a leading `:`) or a wildcard (a leading `?`), alongside the
-  existing `isheld` (a leading `'`). Holding a symbol is a no-op exactly when one
-  of the three is true.
+  This invalidates the stored format — a payload written by an earlier version is
+  a three-element list and will not parse — so the schema version is bumped to
+  `3`, and opening an older database fails with a clear error rather than
+  per-row failures.
 
 ### Added
+
+- **`iskeyword(f)` and `iswildcard(f)`**, which test whether a symbol scalar form
+  is a keyword (a leading `:`) or a wildcard (a leading `?`).
 
 - **Extern types**: a form can hold a host-level value that is not JSON itself — a
   promise, a socket, a config handle — wrapped in a **`FormExtern`**. A provider

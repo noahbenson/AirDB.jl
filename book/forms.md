@@ -107,52 +107,20 @@ copy(f) === f      # true — forms are immutable
 empty(f)           # Form() — the empty container
 ```
 
-## The `held` flag
+## Keywords and wildcards
 
-A container carries a `held` flag, and a symbol scalar form carries the same idea
-as a leading quote on its name. `hold` sets it, `unhold` clears it, and `isheld`
-tests it. It is part of a form's value — a held form is not equal to an unheld one
-— and it is written in the form's JSON, so a held form round-trips through the
-database.
-
-```julia
-h = hold(form(a = 1))        # the same form, now held
-isheld(h)                    # true
-hold(h) === h                # idempotent
-
-hold(Form(:abc))             # Form(Symbol("'abc")) — a leading quote
-hold(Form(Symbol("'abc")))   # unchanged — quotes do not stack
-unhold(Form(Symbol("'abc"))) # Form(:abc)
-
-hold(Form(5))                # Form(5) — other forms are returned unchanged
-```
-
-A symbol that begins with a colon is a **keyword** and one that begins with a
-question mark is a **wildcard**. Both are *inert*: they are already their own
-value, so holding one is a no-op — `hold` and `unhold` leave them exactly as they
-are, and `isheld` does not count them as held.
+A symbol that begins with a colon is a **keyword**, and one that begins with a
+question mark is a **wildcard**. They are ordinary leaves with distinct text, so a
+keyword and a wildcard are never equal to each other or to a plain symbol.
+`iskeyword` and `iswildcard` test for them.
 
 ```julia
-hold(Form(Symbol(":abc")))     # unchanged — a keyword is inert
-unhold(Form(Symbol(":abc")))   # unchanged — a keyword never unholds
-isheld(Form(Symbol(":abc")))   # false — a keyword is not a held symbol
-
-hold(Form(Symbol("?abc")))     # unchanged — a wildcard is inert
-isheld(Form(Symbol("?abc")))   # false
-
-Form(Symbol(":abc"))           # not equal to Form(Symbol("'abc")) or Form(Symbol("?abc"))
-```
-
-Three predicates classify a symbol leaf: `isheld` (a leading `'`), `iskeyword` (a
-leading `:`), and `iswildcard` (a leading `?`). Holding a symbol is a no-op
-exactly when one of them is true.
-
-```julia
-isheld(Form(Symbol("'abc")))     # true
 iskeyword(Form(Symbol(":abc")))  # true
 iswildcard(Form(Symbol("?abc"))) # true
-isheld(Form(:abc))               # false — a plain symbol
+iskeyword(Form(:abc))            # false — a plain symbol
 iswildcard(Form(Symbol(":abc"))) # false
+
+Form(Symbol(":abc"))             # not equal to Form(Symbol("?abc")) or Form(:abc)
 ```
 
 ## Updating
@@ -207,8 +175,8 @@ sprint(show, Form(5))                  # "Form(5)"
 
 ## JSON
 
-A container is written as the three-element list `[seq, map, held]`, and a scalar
-form as its bare leaf, which makes the format self-describing. Strings and symbols are
+A container is written as the two-element list `[seq, map]`, and a scalar form as
+its bare leaf, which makes the format self-describing. Strings and symbols are
 both JSON strings, told apart by the first character inside the quotes (`'` for a
 string, `:` for a symbol); a float always carries a point or exponent; and a
 complex number is written as `{"re": …, "im": …}`.
@@ -216,8 +184,8 @@ complex number is written as `{"re": …, "im": …}`.
 ```julia
 using AirDB: to_JSON, from_JSON
 
-to_JSON(form("widget", 1, 2.5))   # "[[\"'widget\", 1, 2.5], {}, false]"
-to_JSON(hold(form(a = 1)))        # "[[], {\":a\": 1}, true]" — the flag is last
+to_JSON(form("widget", 1, 2.5))   # "[[\"'widget\", 1, 2.5], {}]"
+to_JSON(form(a = 1))              # "[[], {\":a\": 1}]"
 to_JSON(Form(5))                  # "5"
 to_JSON(Form("abc"))              # "\"'abc\""
 
