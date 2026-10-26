@@ -75,15 +75,26 @@ length(f); haskey(f, k)
 ## Volatile forms
 
 ```julia
-VolatileForm(db, seq...; keys...) -> VolatileForm
-VolatileForm(db, form::Form)      -> VolatileForm
-get_form(db, id::UUID)            -> VolatileForm
-isloaded(vf)                      -> Bool
-AirDB.load!(vf)                   -> VolatileForm
+VolatileForm(db, seq...; keys...)       -> VolatileForm
+VolatileForm(db, form::Form;            -> VolatileForm
+             metadata = nothing,
+             history = true)
+get_form(db, id::UUID)                  -> VolatileForm
+isloaded(vf)                            -> Bool
+AirDB.load!(vf)                         -> VolatileForm
 
-vf[]                              # read the whole form (loads if needed)
-vf[idxs...]                       # read along a path
+vf[]                                    # read the whole form (loads if needed)
+vf[idxs...]                             # read along a path
+
+metadata(vf)                            # the optional metadata Form, or nothing
+history(vf)                             # whether this form records history
+set_metadata!(vf, m)                    # transactional; commits a new version
 ```
+
+`metadata` is stored in its own JSONB column alongside the payload.
+`history` is fixed at construction: `true` (the default) appends a row to
+`form_history` on every update; `false` keeps only the current row and overwrites
+it.
 
 ## Named forms
 
@@ -113,15 +124,28 @@ AirDB.from_JSON(db, s)              -> Form            # resolve links via the d
 ## Extern types
 
 ```julia
-AbstractAirExtern                   # supertype of a host-level value a form can hold
-FormExtern(x)                       # the form wrapping one
-value(fe)                           # the extern back out
+AbstractAirExtern                     # supertype of an extern's data
+FormExtern                            # the form wrapping an extern handle
+DeadExtern                            # the data of a stored-away (dead) extern
+value(fe)                             # the data back out
 
-serialize_extern(obj)               # provider: obj -> JSON-able payload (a method)
-deserialize_extern(::Val{name}, p)  # provider: payload -> obj (a method)
-register_extern(:name, T;           # register T under a symbol, with its equality
-                isequal = ===,      #   (a function, not a method: no piracy)
-                hash = ...)
+register_extern(:name, T;             # declare a type's interface
+                read_only  = PDict(), #   (data, args) -> Form
+                read_edit  = PDict(), #   (data, args) -> Form, needs a reserve
+                constructors = PDict(), # (args) -> data
+                immutable = false,
+                serialize = nothing,  # (data, io) -> nothing
+                deserialize = nothing)# (io) -> data
+
+get_extern_API(name::Symbol)          # the type-level API
+get_extern_API(fe::FormExtern)        # the value API (immutable types only)
+construct(api, ctor, args; id = nothing)  -> FormExtern
+api.call(op::Form, args::Form)        -> Form
+
+reserve_read(f, resources...)         # read-only; runs on the caller's task
+reserve(f, resources...)              -> ExternPromise
+p[]                                   # wait for a reservation's result
+ExternError
 ```
 
 See [Extern types](externs.md).

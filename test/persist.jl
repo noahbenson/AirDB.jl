@@ -110,27 +110,64 @@ end
             @test_throws FormNotFound get_form(db, uuid4())[]
         end
 
-        @testset "externs survive JSONB" begin
-            # The types are registered in test/externs.jl. JSONB reorders object
-            # keys and normalizes whitespace, so a round trip through PostgreSQL is
-            # a stronger test of the extern encoding than the string one.
-            vf = VolatileForm(db, cfg = ConfigHandle(7, "x"), n = 1)
+        @testset "extern resources survive JSONB" begin
+            # The types are registered in test/externs.jl. The form stores only
+            # the type/id reference; the bytes live in the `resources` table.
+            c = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(7),
+                          id = Symbol(":db-test"))
+            vf = VolatileForm(db, cfg = c, n = 1)
             AirDB.sync(db)
-            @test occursin("\"'extern\"", _current_payload(conn, vf.id))
+            payload = _current_payload(conn, vf.id)
+            @test occursin("\"extern\"", payload) && occursin("'counter", payload)
+            res = LibPQ.execute(conn, AirDB._SELECT_RESOURCE_SQL, ("counter", ":db-test"))
+            @test length(res) == 1
+            @test res[1, 1] == UInt8['7']
             # drop the in-memory copy and read it back from the database
             id = vf.id
-            vf = nothing
+            vf = nothing; c = nothing
             GC.gc(); GC.gc()
             r = get_form(db, id)[]
-            @test r[:cfg] isa FormExtern{ConfigHandle}
-            @test value(r[:cfg]) == ConfigHandle(7, "x")
-            @test r == form(cfg = ConfigHandle(7, "x"), n = 1)
-            # an update that changes only the extern round-trips too
-            vf2 = get_form(db, id)
-            @tx vf2[:cfg] = ConfigHandle(8, "y")
+            @test r[:cfg] isa FormExtern
+            @test value(r[:cfg]) isa CounterData
+            @test value(r[:cfg]).n == 7
+            # a read-edit updates the resource bytes on the next write
+            p = reserve(r[:cfg]) do a; a.call(Form(Symbol(":bump")), form()); end
+            @test p[] == Form(8)
             AirDB.sync(db)
-            r2 = get_form(db, id)[]
-            @test value(r2[:cfg]) == ConfigHandle(8, "y")
+            res2 = LibPQ.execute(conn, AirDB._SELECT_RESOURCE_SQL, ("counter", ":db-test"))
+            @test res2[1, 1] == UInt8['8']
+        end
+
+        @testset "metadata and history" begin
+            # a current-only form stores metadata but never appends history
+            m = VolatileForm(db, form(a = 1); metadata = form(v = 1), history = false)
+            AirDB.sync(db)
+            @test _history(conn, m.id) == []
+            @test metadata(m) == form(v = 1)
+            @test !history(m)
+            @tx m[:a] = 2
+            AirDB.sync(db)
+            @test _history(conn, m.id) == []
+            @tx set_metadata!(m, form(v = 2))
+            AirDB.sync(db)
+            @test _history(conn, m.id) == []
+            @test metadata(m) == form(v = 2)
+            # the metadata is persisted and read back
+            id = m.id
+            m = nothing
+            GC.gc(); GC.gc()
+            r = get_form(db, id)
+            @test metadata(r) == form(v = 2)     # reading metadata loads the row
+            @test !history(r)
+            @test value(r[][:a]) == 2
+            # a normal form still records history
+            h = VolatileForm(db, a = 1)
+            AirDB.sync(db)
+            @tx h[:a] = 2
+            AirDB.sync(db)
+            @test length(_history(conn, h.id)) == 2
+            @test metadata(h) === nothing
+            @test history(h)
         end
 
         @testset "concurrent writers" begin

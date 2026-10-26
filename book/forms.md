@@ -198,8 +198,9 @@ A form may link to a `VolatileForm`, written `"@<uuid>"`. Reading such a link
 needs the database that owns it (see [Persistence](persistence.md)); without one
 it is an error.
 
-A form may also hold a `FormExtern`, written as the tagged list `["extern",
-"<type>", <payload>]`. See [Extern types](externs.md).
+A form may also hold a `FormExtern`, written as `{"extern": "<type>", "id":
+"<id>"}` — or `{"extern": "<type>"}` when it is dead. See
+[Extern types](externs.md).
 
 ```julia
 from_JSON("[[\"@11111111-1111-1111-1111-111111111111\"], {}]")

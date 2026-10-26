@@ -31,13 +31,17 @@ abstract type Form end
     AbstractAirExtern
 
 The supertype of a host-level value a form can hold *without* being JSON itself —
-a promise, a socket, a configuration handle, a cached value. A form stores one
-inside a [`FormExtern`](@ref), which serializes it through
-[`serialize_extern`](@ref) and [`deserialize_extern`](@ref); the type must be
-registered with [`register_extern`](@ref) before a form holding it can be written
-or read.
+a socket, a promise, a configuration handle, a cached value. A form stores one
+inside a [`FormExtern`](@ref); its operations, constructors, and optional
+serialization are declared with [`register_extern`](@ref).
 """
 abstract type AbstractAirExtern end
+
+# `Database` (database.jl) and the form types refer to one another — a form
+# belongs to a database, and a database holds caches of forms and extern
+# resources — so the form types are written against this abstract type, which
+# `Database` and `MemoryDatabase` subtype.
+abstract type AbstractDatabase end
 
 """
     FormValue
@@ -82,16 +86,67 @@ struct FormScalar{T<:FormLeaf} <: Form
 end
 
 """
-    FormExtern(value)
+    DeadExtern(type)
 
-A form holding a host-level [`AbstractAirExtern`](@ref): a value that cannot be
-written as JSON directly and is therefore stored through a provider's
-[`serialize_extern`](@ref)/[`deserialize_extern`](@ref). Build one with
-[`to_form`](@ref) or `FormExtern(x)`; use [`value`](@ref) to get the wrapped
-object back.
+The data of a [`FormExtern`](@ref) whose object could not be stored: it was
+unnamed, or its type declared no serialization. A dead extern carries only the
+registered type name and raises whenever it is used.
+"""
+struct DeadExtern <: AbstractAirExtern
+    type::Symbol
+end
+
+# A reader/writer lock over a resource: any number of readers may hold it at
+# once; a writer excludes both readers and other writers. Writers are preferred
+# so a stream of readers cannot starve one. Nested use on one task is not
+# supported beyond a plain reader re-entry.
+mutable struct ReadWriteLock
+    mtx::ReentrantLock
+    cond::Threads.Condition
+    readers::Int
+    writer::Bool
+    waiting_writers::Int
+    ReadWriteLock() = (m = ReentrantLock(); new(m, Threads.Condition(m), 0, false, 0))
+end
+
+"""
+    ExternHandle
+
+The live state behind a [`FormExtern`](@ref): the registered type name, the
+optional keyword `id` under which it is stored, the object's `data`, the lock and
+the Air `Volatile{Int}` version cell that give it its concurrency semantics, and
+the database it belongs to. A handle is created either by `construct` or by
+loading a form that references it; its data is read from the `resources` table on
+first use when it was loaded.
+"""
+mutable struct ExternHandle{T<:AbstractAirExtern}
+    type::Symbol
+    id::Union{Nothing,Symbol}
+    data::Union{Nothing,T}
+    loaded::Bool
+    lock::ReadWriteLock
+    loadlock::ReentrantLock          # guards the lazy `resources` read
+    version::Volatile{Int}           # Air version cell, read inside transactions
+    edits::Int                       # read-edit ops since the last publish
+    dirty::Bool                      # read-edited since the last resource write
+    db::Union{Nothing,AbstractDatabase}
+    ExternHandle{T}(type, id, data, loaded, lock, loadlock, version, edits, dirty, db) where {T} =
+        new(type, id, data, loaded, lock, loadlock, version, edits, dirty, db)
+end
+_extern_handle(::Type{T}, type, id, data, loaded, db) where {T<:AbstractAirExtern} =
+    ExternHandle{T}(type, id, data, loaded, ReadWriteLock(), ReentrantLock(),
+                    Volatile{Int}(0), 0, false, db)
+
+"""
+    FormExtern(handle)
+
+A form holding a host-level [`AbstractAirExtern`](@ref): an object whose
+operations are defined by its registered type and whose data lives in an
+[`ExternHandle`](@ref). Build one with `construct`; use [`value`](@ref) to get the
+data back.
 """
 struct FormExtern{T<:AbstractAirExtern} <: Form
-    value::T
+    handle::ExternHandle{T}
 end
 
 """
@@ -108,11 +163,6 @@ struct FormContainer <: Form
     # must not capture two positional values.
     FormContainer(seq::FormSeq, map::FormMap) = new(seq, map)
 end
-
-# `Database` (database.jl) and a `VolatileForm` refer to one another — a form
-# belongs to a database, and a database holds the name table of forms — so the
-# form is written against this abstract type, which `Database` subtypes.
-abstract type AbstractDatabase end
 
 """
     VolatileForm
@@ -138,11 +188,14 @@ mutable struct VolatileForm <: Form
     persisted::Bool                            # a row exists / has been written
     lock::ReentrantLock                        # guards the load
     db::AbstractDatabase
+    metadata::Union{Nothing,Form}              # optional JSONB metadata (mutable)
+    history::Bool                              # record history? fixed at creation
     # The inner constructor is typed so that it does not collide with the
     # `VolatileForm(db, args...)` convenience constructor below.
     VolatileForm(id::UUID, volatile::Union{Nothing,Volatile{Form}}, loaded::Bool,
-                 persisted::Bool, lock::ReentrantLock, db::AbstractDatabase) =
-        new(id, volatile, loaded, persisted, lock, db)
+                 persisted::Bool, lock::ReentrantLock, db::AbstractDatabase,
+                 metadata::Union{Nothing,Form}, history::Bool) =
+        new(id, volatile, loaded, persisted, lock, db, metadata, history)
 end
 
 """
@@ -160,10 +213,11 @@ const FormNode = Union{FormScalar,FormContainer,VolatileForm,FormExtern}
     value(fs::FormScalar)
     value(fe::FormExtern)
 
-The leaf a scalar form wraps, or the extern object an extern form wraps.
+The leaf a scalar form wraps, or the data an extern form wraps (loading it from
+the database first if it was loaded rather than constructed).
 """
 value(fs::FormScalar) = fs.value
-value(fe::FormExtern) = fe.value
+value(fe::FormExtern) = (_ensure_loaded(fe.handle); fe.handle.data)
 
 Base.isequal(a::VolatileForm, b::VolatileForm) = a.id == b.id
 Base.:(==)(a::VolatileForm, b::VolatileForm) = a.id == b.id

@@ -26,15 +26,29 @@ fixes in the patch position, which is how the versions below are chosen.
   is a keyword (a leading `:`) or a wildcard (a leading `?`).
 
 - **Extern types**: a form can hold a host-level value that is not JSON itself — a
-  promise, a socket, a config handle — wrapped in a **`FormExtern`**. A provider
-  subclasses `AbstractAirExtern`, defines `serialize_extern`/`deserialize_extern`,
-  and registers the type with `register_extern(:name, T; isequal, hash)`. The
-  equality and hash are *functions given at registration* (defaulting to identity)
-  rather than methods on `FormExtern`, so a provider never commits type piracy.
-- An extern is stored as the tagged list `["extern", "<type>", <payload>]`, told
-  apart from a container by its first element (a tag string vs. a seq list).
-  Reading an unregistered type raises `ExternError`; a tombstone payload
-  (`:abandoned`/`:expired`) raises `ExternTombstone`.
+  socket, a promise, a configuration handle — wrapped in a **`FormExtern`**. A
+  provider subclasses `AbstractAirExtern` and declares its interface with
+  `register_extern(:name, T; read_only, read_edit, constructors, immutable,
+  serialize, deserialize)`: `PDict`s of keyword operations, each taking the data
+  and an argument form and returning a form. Constructors are run with
+  `construct(get_extern_API(:name), ctor, args; id)`; operations with
+  `api.call(op, args)`.
+- **Concurrency**: a mutable extern is never handed out directly. `reserve_read`
+  takes shared read locks (in sorted `(type, id)` order) and runs on the caller's
+  task; `reserve` takes exclusive write locks on a spawned task and returns an
+  `ExternPromise`. `immutable` types need neither. Each resource carries an Air
+  `Volatile{Int}` version, so a transaction that read a resource retries if a
+  read-edit intervened — no change to Air was needed.
+- **Stored externs**: a named, serializable extern is written as
+  `{"extern": "<type>", "id": "<id>"}`, with its bytes in the new `resources`
+  table keyed by `(type, id)`; read-edit operations keep those bytes up to date.
+  An unnamed or non-serializable extern is written as `{"extern": "<type>"}` and
+  loads as a **`DeadExtern`**, which raises `ExternError` when used.
+- **Volatile-form metadata and history**: `VolatileForm(...; metadata, history)`,
+  with `metadata`, `history`, and the transactional `set_metadata!`. A form with
+  `history = false` overwrites its current row instead of appending history.
+  `form_current` and `form_history` gained a `metadata` column and
+  `form_current` a `history` flag; the schema version is now `4`.
 
 ## [0.1.0] - 2026-10-12
 

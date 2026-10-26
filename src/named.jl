@@ -59,7 +59,8 @@ named_form(db, "root"; create = true)  # ERROR: already in use
 named_form(db, "other"; create = nothing)   # nothing
 ```
 """
-function named_form(db::AbstractDatabase, name; create::Union{Nothing,Bool} = false, value = _NOVALUE)
+function named_form(db::AbstractDatabase, name; create::Union{Nothing,Bool} = false,
+                    value = _NOVALUE, metadata = nothing, history::Bool = true)
     _check_open(db)
     key = _namekey(name)
     existing = get(_name_table(db), key, nothing)
@@ -69,18 +70,20 @@ function named_form(db::AbstractDatabase, name; create::Union{Nothing,Bool} = fa
     end
     (create === false) && throw(ArgumentError("no form is named \"$key\""))
     (create === nothing) && return nothing
-    return _create_name!(db, key, value)
+    return _create_name!(db, key, value, metadata, history)
 end
 
 # Register a brand-new name. Runs in a transaction — the caller's, or a fresh one
 # — so the check-and-set is atomic and the change is retried or discarded with the
 # transaction. `tx` folds into an enclosing transaction, so this is correct
 # whether or not the caller is already inside one.
-function _create_name!(db::AbstractDatabase, key::AbstractString, value)
+function _create_name!(db::AbstractDatabase, key::AbstractString, value,
+                       metadata = nothing, history::Bool = true)
     return tx() do
         table = _name_table(db)
         haskey(table, key) && throw(ArgumentError("the name \"$key\" is already in use"))
-        vf = value isa VolatileForm ? value : VolatileForm(db, _as_form(value))
+        vf = value isa VolatileForm ? value :
+             VolatileForm(db, _as_form(value); metadata = metadata, history = history)
         db.names[] = push(table, key => vf)
         _register_name!(db, key, vf.id)
         vf

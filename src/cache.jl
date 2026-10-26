@@ -33,7 +33,7 @@ function _cached_form(db::AbstractDatabase, id::UUID)
             v = wr.value
             v === nothing || return v::VolatileForm
         end
-        vf = VolatileForm(id, nothing, false, true, ReentrantLock(), db)
+        vf = VolatileForm(id, nothing, false, true, ReentrantLock(), db, nothing, true)
         db.cache[id] = WeakRef(vf)
         return vf
     finally

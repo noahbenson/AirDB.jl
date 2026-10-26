@@ -45,8 +45,10 @@ function load!(vf::VolatileForm)
     try
         vf.loaded && return vf
         _check_health(vf.db)
-        form = _read_current(vf.db, vf.id)
+        form, metadata, history = _read_current(vf.db, vf.id)
         vf.volatile = Volatile{Form}(form)
+        vf.metadata = metadata
+        vf.history = history
         vf.loaded = true
         vf.persisted = true
         return vf
@@ -58,21 +60,72 @@ end
 # ---- construction ------------------------------------------------------------
 
 """
-    VolatileForm(db::AbstractDatabase, form::Form) -> VolatileForm
-    VolatileForm(db::AbstractDatabase, args...; kwargs...) -> VolatileForm
+    VolatileForm(db::AbstractDatabase, form::Form; metadata = nothing,
+                 history = true) -> VolatileForm
+    VolatileForm(db::AbstractDatabase, args...; metadata = nothing,
+                 history = true, kwargs...) -> VolatileForm
 
 Creates a new volatile form with a fresh UUID and registers it with `db` so it
 will be written to the database. The arguments of the second form are the same as
 [`Form`](@ref)'s.
+
+`metadata` is an optional [form](@ref Form) stored alongside the form in its
+`metadata` JSONB column; it may be changed later with [`set_metadata!`](@ref).
+`history` is fixed for the life of the form: `true` appends a row to
+`form_history` on every update, while `false` keeps only the current row and
+overwrites it.
 """
-function VolatileForm(db::AbstractDatabase, form::Form)
+function VolatileForm(db::AbstractDatabase, form::Form;
+                      metadata = nothing, history::Bool = true)
     _check_open(db)
-    vf = VolatileForm(uuid4(), Volatile{Form}(form), true, false, ReentrantLock(), db)
+    m = metadata === nothing ? nothing : to_form(metadata)
+    vf = VolatileForm(uuid4(), Volatile{Form}(form), true, false, ReentrantLock(), db,
+                      m, history)
     _cache_put!(db, vf)
     _register!(vf, form)
     return vf
 end
-VolatileForm(db::AbstractDatabase, args...; kwargs...) = VolatileForm(db, form(args...; kwargs...))
+function VolatileForm(db::AbstractDatabase, args...;
+                      metadata = nothing, history::Bool = true, kwargs...)
+    return VolatileForm(db, form(args...; kwargs...); metadata = metadata, history = history)
+end
+
+"""
+    metadata(vf::VolatileForm) -> Union{Form,Nothing}
+
+The form's optional metadata.
+"""
+function metadata(vf::VolatileForm)
+    vf.loaded || load!(vf)
+    return vf.metadata
+end
+
+"""
+    history(vf::VolatileForm) -> Bool
+
+Whether `vf` records its history or keeps only its current row. Fixed at
+construction.
+"""
+function history(vf::VolatileForm)
+    vf.loaded || load!(vf)
+    return vf.history
+end
+
+"""
+    set_metadata!(vf::VolatileForm, m) -> VolatileForm
+
+Sets the form's metadata (a [`Form`](@ref), or `nothing` to clear it). Like any
+write, this must happen inside a transaction, and it commits a new version of the
+form with the new metadata.
+"""
+function set_metadata!(vf::VolatileForm, m)
+    currtx() === nothing &&
+        throw(ArgumentError("metadata can only be set inside a transaction"))
+    vf.loaded || load!(vf)
+    vf.metadata = m === nothing ? nothing : to_form(m)
+    _register!(vf, vf[])
+    return vf
+end
 
 # ---- reading -----------------------------------------------------------------
 
@@ -127,4 +180,4 @@ The volatile form's link text, `"@<uuid>"` (without the surrounding JSON quotes)
 """
 to_JSON(vf::VolatileForm) = string('@', vf.id)
 
-export VolatileForm, get_form, isloaded
+export VolatileForm, get_form, isloaded, metadata, history, set_metadata!

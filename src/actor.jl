@@ -24,24 +24,40 @@
 struct AccumulatedUpdate
     vf::VolatileForm
     form::Form
+    metadata::Union{Nothing,Form}
+    history::Bool
 end
 
-# The mutable batch a transaction's message carries: the forms it changed and the
-# names it registered. Later writes in the same transaction append to it, so the
-# actor sees the final contents once the transaction commits.
+# A resource's bytes, queued by a read-edit operation.
+struct PendingResource
+    type::Symbol
+    id::Symbol
+    data::Vector{UInt8}
+end
+
+# The mutable batch a transaction's message carries: the forms it changed, the
+# names it registered, and the resource bytes it produced. Later writes in the
+# same transaction append to it, so the actor sees the final contents once the
+# transaction commits.
 mutable struct WriteBatch
     forms::Dict{UUID,AccumulatedUpdate}
     names::Dict{String,UUID}
+    resources::Dict{Tuple{Symbol,Symbol},PendingResource}
 end
-WriteBatch() = WriteBatch(Dict{UUID,AccumulatedUpdate}(), Dict{String,UUID}())
-_batch_empty(b::WriteBatch) = isempty(b.forms) && isempty(b.names)
-_batch_empty!(b::WriteBatch) = (empty!(b.forms); empty!(b.names))
+WriteBatch() = WriteBatch(Dict{UUID,AccumulatedUpdate}(), Dict{String,UUID}(),
+                          Dict{Tuple{Symbol,Symbol},PendingResource}())
+_batch_empty(b::WriteBatch) =
+    isempty(b.forms) && isempty(b.names) && isempty(b.resources)
+_batch_empty!(b::WriteBatch) =
+    (empty!(b.forms); empty!(b.names); empty!(b.resources))
 
 # A write waiting to reach the database. The `vf` field is a strong reference, so
 # a queued form cannot be collected (and reloaded) while its write is pending.
 struct PendingWrite
     vf::VolatileForm
     form::Form
+    metadata::Union{Nothing,Form}
+    history::Bool
     txid::Int64
 end
 
@@ -65,6 +81,7 @@ mutable struct FormActorState
     conn::LibPQ.Connection
     pending::Vector{PendingWrite}
     names::Vector{PendingName}
+    resources::Dict{Tuple{Symbol,Symbol},PendingResource}
     txseq::Int64
     db::Union{Nothing,Database}
     last_error::Union{Nothing,Exception}
@@ -108,7 +125,7 @@ end
 # Arrange for `form` — the value `vf` was just set to — to reach the database when
 # the current transaction commits (or immediately, if there is no transaction).
 function _register!(vf::VolatileForm, form::Form)
-    u = AccumulatedUpdate(vf, form)
+    u = AccumulatedUpdate(vf, form, vf.metadata, vf.history)
     _stage!(b -> (b.forms[vf.id] = u), vf.db.writeactor)
     return form
 end
@@ -121,16 +138,27 @@ function _register_name!(db::AbstractDatabase, name::AbstractString, id::UUID)
     return nothing
 end
 
+# Queue a read-edited resource's bytes. The bytes are captured by the caller
+# while it holds the resource's write lock.
+function _stage_resource!(db::AbstractDatabase, type::Symbol, id::Symbol, data::Vector{UInt8})
+    pr = PendingResource(type, id, data)
+    _stage!(b -> (b.resources[(type, id)] = pr), db.writeactor)
+    return nothing
+end
+
 # The actor's side: take a committed batch, queue it, and flush when the queue is
 # large enough. Under the default `max_batch == 1` this writes each commit at once.
 function _receive!(st::FormActorState, b::WriteBatch)
     _batch_empty(b) && return st
     txid = (st.txseq += 1)
     for u in values(b.forms)
-        push!(st.pending, PendingWrite(u.vf, u.form, txid))
+        push!(st.pending, PendingWrite(u.vf, u.form, u.metadata, u.history, txid))
     end
     for (name, id) in b.names
         push!(st.names, PendingName(name, id))
+    end
+    for (k, pr) in b.resources
+        st.resources[k] = pr
     end
     # The updates now live in `pending` (which holds the strong references that
     # keep the forms alive until they are written). Clearing the batch releases
@@ -147,14 +175,14 @@ end
 # recorded on the database, and the error is rethrown — which poisons the actor,
 # so every later write and read raises.
 function _flush!(st::FormActorState)
-    (isempty(st.pending) && isempty(st.names)) && return st
+    (isempty(st.pending) && isempty(st.names) && isempty(st.resources)) && return st
     db = st.db
     attempt = 0
     t0 = time()
     delay = st.config.retry_delay
     while true
         try
-            _write_batch!(st.conn, st.pending, st.names)
+            _write_batch!(st.conn, db, st.pending, st.names, st.resources)
             break
         catch e
             st.last_error = e
@@ -174,6 +202,7 @@ function _flush!(st::FormActorState)
     end
     empty!(st.pending)
     empty!(st.names)
+    empty!(st.resources)
     return st
 end
 
@@ -193,11 +222,40 @@ end
 # snapshot, then record every name, all inside one transaction so the commit is
 # all-or-nothing. Forms are written before names so the name's foreign key is
 # satisfied.
-function _write_batch!(conn, pending::Vector{PendingWrite}, names::Vector{PendingName})
+function _write_batch!(conn, db, pending::Vector{PendingWrite}, names::Vector{PendingName},
+                       queued::Dict{Tuple{Symbol,Symbol},PendingResource})
+    # Encode the forms first: encoding records every extern a form references, so
+    # those resource rows are written before the forms that name them.
+    refs = _refset()
+    empty!(refs)
+    payloads = [to_JSON(pw.form) for pw in pending]
+    # LibPQ sends `missing` as SQL NULL; `nothing` would be encoded as a string.
+    metas = [pw.metadata === nothing ? missing : to_JSON(pw.metadata) for pw in pending]
+    resources = Dict{Tuple{Symbol,Symbol},PendingResource}(queued)
+    for h in keys(refs)
+        h isa ExternHandle || continue
+        # A constructed handle learns its database the first time a form that
+        # names it is written, so later read-edits know where to sync.
+        (h.db === nothing && db !== nothing) && setfield!(h, :db, db)
+        _rw_read(h.lock) do
+            resources[(h.type, h.id::Symbol)] =
+                PendingResource(h.type, h.id::Symbol, _serialize_resource(h))
+        end
+    end
     LibPQ.execute(conn, "BEGIN")
     try
-        for pw in pending
-            LibPQ.execute(conn, _UPSERT_SQL, (string(pw.vf.id), to_JSON(pw.form), pw.txid))
+        for pr in values(resources)
+            # LibPQ encodes a `Vector{UInt8}` as a PostgreSQL array literal, so
+            # the bytes are sent as bytea's hex input form instead.
+            LibPQ.execute(conn, _UPSERT_RESOURCE_SQL,
+                          (string(pr.type), string(pr.id), "\\x" * bytes2hex(pr.data)))
+        end
+        for i in eachindex(pending)
+            pw = pending[i]
+            params = pw.history ?
+                (string(pw.vf.id), payloads[i], metas[i], pw.history, pw.txid) :
+                (string(pw.vf.id), payloads[i], metas[i], pw.history)
+            LibPQ.execute(conn, pw.history ? _UPSERT_SQL : _UPSERT_CURRENT_SQL, params)
         end
         for pn in names
             LibPQ.execute(conn, _UPSERT_NAME_SQL, (pn.name, string(pn.id)))

@@ -8,10 +8,10 @@
 # MIT License
 # Copyright (c) 2020-2026 Noah C. Benson
 
-# Bumped to 3 when the `held` flag was removed from the form encoding: a stored
-# payload is now the two-element `[seq, map]`, so a database written by an earlier
-# version cannot be read and is refused at open time rather than failing per row.
-const _SCHEMA_VERSION = "3"
+# Bumped to 4 for the extern resource table and the per-form metadata/history
+# columns. A database written by an earlier version cannot be read and is refused
+# at open time rather than failing per row.
+const _SCHEMA_VERSION = "4"
 
 const _DDL_STATEMENTS = [
     """
@@ -21,6 +21,7 @@ const _DDL_STATEMENTS = [
         created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
         tx_id       BIGINT      NOT NULL,
         payload     JSONB       NOT NULL,
+        metadata    JSONB,
         PRIMARY KEY (form_id, version)
     )
     """,
@@ -30,7 +31,9 @@ const _DDL_STATEMENTS = [
         form_id     UUID        PRIMARY KEY,
         version     BIGINT      NOT NULL,
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-        payload     JSONB       NOT NULL
+        payload     JSONB       NOT NULL,
+        metadata    JSONB,
+        history     BOOLEAN     NOT NULL DEFAULT TRUE
     )
     """,
     """
@@ -39,6 +42,16 @@ const _DDL_STATEMENTS = [
         form_id     UUID        NOT NULL REFERENCES form_current(form_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS resources (
+        type        TEXT        NOT NULL,
+        id          TEXT        NOT NULL,
+        data        BYTEA       NOT NULL,
+        PRIMARY KEY (type, id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS resources_type_idx ON resources (type)",
+    "CREATE INDEX IF NOT EXISTS resources_id_idx   ON resources (id)",
     "CREATE TABLE IF NOT EXISTS airdb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "INSERT INTO airdb_meta (key, value) VALUES ('schema_version', '$_SCHEMA_VERSION') " *
     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -48,28 +61,50 @@ const _DROP_STATEMENTS = [
     "DROP TABLE IF EXISTS form_name",      # before form_current: it references it
     "DROP TABLE IF EXISTS form_history",
     "DROP TABLE IF EXISTS form_current",
+    "DROP TABLE IF EXISTS resources",
     "DROP TABLE IF EXISTS airdb_meta",
 ]
 
 # One statement per form: append the new version to the history and project it
 # into the current snapshot, atomically. The version is assigned by the database
 # (1 on first insert, otherwise one more than the current), so the client never
-# needs to read it back.
+# needs to read it back. A current-only form uses `_UPSERT_CURRENT_SQL`, which
+# skips the history insert.
 const _UPSERT_SQL = """
 WITH upserted AS (
-    INSERT INTO form_current (form_id, version, updated_at, payload)
-    VALUES (\$1::uuid, 1, clock_timestamp(), \$2::jsonb)
+    INSERT INTO form_current (form_id, version, updated_at, payload, metadata, history)
+    VALUES (\$1::uuid, 1, clock_timestamp(), \$2::jsonb, \$3::jsonb, \$4::boolean)
     ON CONFLICT (form_id) DO UPDATE
         SET version    = form_current.version + 1,
             updated_at = clock_timestamp(),
-            payload    = EXCLUDED.payload
-    RETURNING form_id, version, payload
+            payload    = EXCLUDED.payload,
+            metadata   = EXCLUDED.metadata,
+            history    = EXCLUDED.history
+    RETURNING form_id, version, payload, metadata
 )
-INSERT INTO form_history (form_id, version, created_at, tx_id, payload)
-SELECT form_id, version, clock_timestamp(), \$3::bigint, payload FROM upserted
+INSERT INTO form_history (form_id, version, created_at, tx_id, payload, metadata)
+SELECT form_id, version, clock_timestamp(), \$5::bigint, payload, metadata FROM upserted
 """
 
-const _SELECT_CURRENT_SQL = "SELECT payload FROM form_current WHERE form_id = \$1::uuid"
+const _UPSERT_CURRENT_SQL = """
+INSERT INTO form_current (form_id, version, updated_at, payload, metadata, history)
+VALUES (\$1::uuid, 1, clock_timestamp(), \$2::jsonb, \$3::jsonb, \$4::boolean)
+ON CONFLICT (form_id) DO UPDATE
+    SET version    = form_current.version + 1,
+        updated_at = clock_timestamp(),
+        payload    = EXCLUDED.payload,
+        metadata   = EXCLUDED.metadata,
+        history    = EXCLUDED.history
+"""
+
+const _SELECT_CURRENT_SQL =
+    "SELECT payload, metadata, history FROM form_current WHERE form_id = \$1::uuid"
+
+const _UPSERT_RESOURCE_SQL =
+    "INSERT INTO resources (type, id, data) VALUES (\$1, \$2, \$3::bytea) " *
+    "ON CONFLICT (type, id) DO UPDATE SET data = EXCLUDED.data"
+
+const _SELECT_RESOURCE_SQL = "SELECT data FROM resources WHERE type = \$1 AND id = \$2"
 
 # A name is an alias for a form id. The writer's upsert overwrites, so a later
 # `name_form!` wins; the in-memory table (the authority for reads) is updated in
@@ -192,32 +227,50 @@ function _read_max_txid(conn)
     return Int64(first(r)[1])
 end
 
+# The form, its metadata (or `nothing`), and its history flag.
 function _read_current(db::Database, id::UUID)
     # The not-found case is reported by returning `nothing`, not by throwing
     # inside `_withread` — a `FormNotFound` is not a database error and must not
     # poison the database.
-    payload = _withread(db) do conn
+    row = _withread(db) do conn
         r = LibPQ.execute(conn, _SELECT_CURRENT_SQL, (string(id),))
+        return isempty(r) ? nothing : (r[1, 1], r[1, 2], r[1, 3])
+    end
+    row === nothing && throw(FormNotFound(id))
+    payload, meta, hist = row
+    form = from_JSON(db, String(payload))
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (form, metadata, Bool(hist))
+end
+
+# Read a resource's bytes and let its type deserialize them.
+function _read_resource(db::Database, type::Symbol, id::Symbol)
+    bytes = _withread(db) do conn
+        r = LibPQ.execute(conn, _SELECT_RESOURCE_SQL, (string(type), string(id)))
         return isempty(r) ? nothing : r[1, 1]
     end
-    payload === nothing && throw(FormNotFound(id))
-    return from_JSON(db, String(payload))
+    bytes === nothing &&
+        throw(ExternError("no resource :$type/$(id) is stored in the database"))
+    return _deserialize_resource(type, Vector{UInt8}(bytes))
 end
 
 """
     from_JSON(db::AbstractDatabase, s::AbstractString) -> Form
 
 Reads a form from JSON, resolving any `"@<uuid>"` links to the (possibly not yet
-loaded) `VolatileForm`s cached by `db`.
+loaded) `VolatileForm`s cached by `db`, and any extern references through `db`'s
+resource registry.
 """
-from_JSON(db::AbstractDatabase, s::AbstractString) = _from_JSON(id -> get_form(db, id), s)
+from_JSON(db::AbstractDatabase, s::AbstractString) =
+    _from_JSON(id -> get_form(db, id), s, db)
 
 # Build a Database from a config whose schema already exists: open the writer
 # connection, start the writer actor, and fill the read pool.
 function _make_database(config::DatabaseConfig)
     wconn = LibPQ.Connection(_conninfo(config))
     txseq = _read_max_txid(wconn)
-    st = FormActorState(config, wconn, PendingWrite[], PendingName[], txseq, nothing, nothing)
+    st = FormActorState(config, wconn, PendingWrite[], PendingName[],
+                        Dict{Tuple{Symbol,Symbol},PendingResource}(), txseq, nothing, nothing)
     actor = Actor{FormActorState}(st)
     db = Database(config, actor, Channel{LibPQ.Connection}(config.readpoolsize),
                   Dict{UUID,WeakRef}(), ReentrantLock(),

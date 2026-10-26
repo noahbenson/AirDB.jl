@@ -27,10 +27,13 @@ The pieces:
   bare leaf), a `FormContainer` (a sequence and a map), a `VolatileForm`, or a
   `FormExtern` (a host-level value that is not JSON itself).
 - **`VolatileForm`** — a `Form` with a stable UUID that persists itself when the
-  transaction that changed it commits, loaded lazily and cached by id.
+  transaction that changed it commits, loaded lazily and cached by id. It carries
+  optional `metadata` (mutable) and a fixed `history` choice.
 - **`AbstractAirExtern`** — a host-level value a form can hold (a promise, a
-  socket, a config handle), stored through `serialize_extern`/`deserialize_extern`
-  and registered with `register_extern`.
+  socket, a config handle), with an interface of read-only and read-edit
+  operations registered by `register_extern`. Mutable externs are accessed through
+  `reserve`/`reserve_read`; a named, serializable extern's bytes are stored in
+  the `resources` table.
 - **`Database`** — the connection, the single writer actor, the read pool, and
   the cache. `create_database` makes a new one; `open_database` opens an existing
   one; `MemoryDatabase` is a fake, in-memory one for tests.

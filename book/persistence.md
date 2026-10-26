@@ -2,7 +2,8 @@
 
 ## The schema
 
-AirDB keeps two tables: an append-only history and an up-to-date snapshot.
+AirDB keeps an append-only history and an up-to-date snapshot of forms, plus the
+bytes of stored externs.
 
 ```sql
 CREATE TABLE form_history (
@@ -11,6 +12,7 @@ CREATE TABLE form_history (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     tx_id       BIGINT      NOT NULL,
     payload     JSONB       NOT NULL,
+    metadata    JSONB,
     PRIMARY KEY (form_id, version)
 );
 
@@ -18,13 +20,23 @@ CREATE TABLE form_current (
     form_id     UUID        PRIMARY KEY,
     version     BIGINT      NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    payload     JSONB       NOT NULL
+    payload     JSONB       NOT NULL,
+    metadata    JSONB,
+    history     BOOLEAN     NOT NULL DEFAULT TRUE
 );
 
 -- An alias table for well-known forms (see Named forms).
 CREATE TABLE form_name (
     name        TEXT        PRIMARY KEY,
     form_id     UUID        NOT NULL REFERENCES form_current(form_id)
+);
+
+-- The bytes of named, serializable externs (see Extern types).
+CREATE TABLE resources (
+    type        TEXT        NOT NULL,
+    id          TEXT        NOT NULL,
+    data        BYTEA       NOT NULL,
+    PRIMARY KEY (type, id)
 );
 ```
 
@@ -33,6 +45,10 @@ Every committed update appends a new row to `form_history` and upserts
 `form_current`, so a lookup is an indexed point read by `form_id`. The version is
 assigned by the database (1 on the first insert, one more each time), and `tx_id`
 groups the rows written by a single commit.
+
+A form created with `history = false` skips the history row: its current row is
+overwritten in place, while still carrying its `metadata` and `payload`. The
+`history` choice is fixed when the form is created.
 
 ```julia
 db = create_database(cfg; overwrite = true)

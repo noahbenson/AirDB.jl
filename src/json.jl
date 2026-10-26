@@ -90,16 +90,21 @@ end
 # A scalar form is just its leaf.
 _jsonvalue(io::IO, fs::FormScalar) = _jsonvalue(io, value(fs))
 
-# An extern is the tagged list `["extern", ":<type>", <payload>]`. The tag is the
-# string `extern` and the type is a symbol, so both carry their usual marker; the
-# payload is whatever `serialize_extern` returns, converted the way any value is.
-# The first element being a *string* rather than a *list* is what tells an extern
-# apart from a container when reading, since a container's first element is always
-# its sequence.
+# An extern is an object with plain keys, like the `{"re","im"}` a complex number
+# uses, so it never collides with a form map (whose keys carry the `:` marker):
+# `{"extern": "'socket", "id": ":my-socket"}` for a stored extern, and
+# `{"extern": "'socket"}` for a dead one. A stored extern's bytes live in the
+# `resources` table; the form only names them.
 function _jsonvalue(io::IO, fe::FormExtern)
-    print(io, "[\"'extern\", \"", ':', _extern_name(typeof(fe.value)), "\", ")
-    _jsonvalue(io, to_form(serialize_extern(fe.value)))
-    return print(io, ']')
+    h = fe.handle
+    print(io, "{\"extern\": ")
+    _jsonstring(io, string(h.type), '\'')
+    if _storable(h)
+        _note_referenced!(h)
+        print(io, ", \"id\": ")
+        _jsonstring(io, string(h.id), ':')
+    end
+    return print(io, "}")
 end
 
 """
@@ -116,8 +121,9 @@ it reads back as a float rather than as an integer. A complex number has no JSON
 equivalent and is written as `{"re": …, "im": …}`, always, even when its
 imaginary part is zero. A [`VolatileForm`](@ref) is written as the string
 `"@<uuid>"`; it is never expanded, so cyclic links are safe to write. A
-[`FormExtern`](@ref) is written as the tagged list `["extern", ":<type>",
-<payload>]`, where the payload is whatever [`serialize_extern`](@ref) returns.
+[`FormExtern`](@ref) is written as the object `{"extern": "<type>", "id":
+"<id>"}` — or `{"extern": "<type>"}` when it is dead — and its bytes live in the
+`resources` table.
 
 """
 function to_JSON(f::Form)
@@ -148,10 +154,14 @@ mutable struct _JSONReader
     b::Base.CodeUnits{UInt8,String}
     i::Int
     resolve::Union{Nothing,Function}
+    db::Union{Nothing,AbstractDatabase}
 end
-_JSONReader(s::AbstractString) = _JSONReader(String(s), nothing)
+_JSONReader(s::AbstractString) = _JSONReader(codeunits(String(s)), 1, nothing, nothing)
 _JSONReader(s::AbstractString, resolve::Union{Nothing,Function}) =
-    _JSONReader(codeunits(String(s)), 1, resolve)
+    _JSONReader(codeunits(String(s)), 1, resolve, nothing)
+_JSONReader(s::AbstractString, resolve::Union{Nothing,Function},
+            db::Union{Nothing,AbstractDatabase}) =
+    _JSONReader(codeunits(String(s)), 1, resolve, db)
 
 _jsonfail(r::_JSONReader, msg) =
     throw(ArgumentError("invalid JSON at byte $(r.i): $msg"))
@@ -380,15 +390,9 @@ function _parseobject!(r::_JSONReader)
     end
 end
 
-# A list is a container or an extern. A container's first element is its sequence
-# — a list — while an extern's first element is the tag *string* `extern`, so one
-# byte after the opening bracket tells the two apart.
+# A list is a container: its first element is the sequence.
 function _parseform!(r::_JSONReader)
     _expect!(r, _BYTE_LBRACKET)
-    _skipws!(r)
-    if !_atend(r) && r.b[r.i] == _BYTE_QUOTE
-        return _parseextern!(r)
-    end
     seq = _parsearray!(r)
     _expect!(r, _BYTE_COMMA)
     pairs = _parseobject!(r)
@@ -397,32 +401,33 @@ function _parseform!(r::_JSONReader)
     return FormContainer(FormSeq(seq), FormMap(kv))
 end
 
-# The extern tag list `["extern", ":<type>", <payload>]`, with the opening bracket
-# already consumed. The payload is parsed as a form and then converted to ordinary
-# Julia data, since an extern's payload is not required to be a form.
-function _parseextern!(r::_JSONReader)
-    tag = _parseleafstring!(r)
-    (tag == "extern") ||
-        _jsonfail(r, "a list whose first element is a string must begin with the extern tag")
-    _expect!(r, _BYTE_COMMA)
-    name = _parseleafstring!(r)
-    (name isa Symbol) || _jsonfail(r, "an extern's type must be a symbol")
-    _expect!(r, _BYTE_COMMA)
-    payload = _parsevalue!(r)
-    _expect!(r, _BYTE_RBRACKET)
-    return _extern_rehydrate(name, payload)
+# Whether a parsed object is an extern: plain keys `extern` and optionally `id`,
+# which a form map cannot have (its keys carry the `:` marker).
+function _isexternkeys(p::Vector{Pair{String,FormValue}})
+    if length(p) == 1
+        return first(p[1]) == "extern"
+    elseif length(p) == 2
+        return (first(p[1]) == "extern" && first(p[2]) == "id") ||
+               (first(p[1]) == "id" && first(p[2]) == "extern")
+    end
+    return false
 end
 
-# Turn a parsed extern back into a `FormExtern`. A tombstone payload is raised
-# rather than handed to a provider; an unregistered type is an error naming it.
-function _extern_rehydrate(name::Symbol, payload)
-    if payload isa Symbol && payload in _EXTERN_TOMBSTONES
-        throw(ExternTombstone(name, payload))
+_externfield(p::Vector{Pair{String,FormValue}}, k::String) =
+    (q = findfirst(x -> first(x) == k, p); q === nothing ? nothing : last(p[q]))
+
+# Turn a parsed extern object back into a `FormExtern`. A missing `id` is a dead
+# extern; an id resolves through the database's handle registry, though the bytes
+# themselves are read lazily.
+function _extern_rehydrate(r::_JSONReader, name::FormValue, id::FormValue)
+    (name isa String) || _jsonfail(r, "an extern's type name must be a string")
+    sym = Symbol(name)
+    if id === nothing
+        return FormExtern(_extern_handle(DeadExtern, sym, nothing, DeadExtern(sym), true, r.db))
     end
-    reg = get(_EXTERN_BY_NAME, name, nothing)
-    reg === nothing &&
-        throw(ExternError("no extern type is registered for :$name"))
-    return FormExtern(deserialize_extern(Val(name), _to_native(payload)))
+    (id isa Symbol) || _jsonfail(r, "an extern's id must be a keyword")
+    _extern_type(sym)                       # raise if the type is not registered
+    return FormExtern(_get_handle(r.db, sym, id))
 end
 
 # Whether a two-key object is the `{"re": …, "im": …}` a complex number is
@@ -443,8 +448,12 @@ function _parsevalue!(r::_JSONReader)
     (c == _BYTE_LBRACKET) && return _parseform!(r)
     if c == _BYTE_LBRACE
         pairs = _parseobject!(r)
-        # `{"re": …, "im": …}` is how a complex number is written; any other
-        # object is a form with only a map.
+        # An extern object names a resource; `{"re","im"}` is how a complex
+        # number is written; any other object is a form with only a map.
+        if _isexternkeys(pairs)
+            return _extern_rehydrate(r, _externfield(pairs, "extern"),
+                                     _externfield(pairs, "id"))
+        end
         if _iscomplexkeys(pairs)
             re = (first(pairs[1]) == "re" ? pairs[1] : pairs[2]).second
             im = (first(pairs[1]) == "im" ? pairs[1] : pairs[2]).second
@@ -472,18 +481,18 @@ a link requires a database, so either pass one, or pass a function that turns a
 `UUID` into the value the link should yield. Reading a form that contains a link
 without a resolver is an error.
 
-A list beginning with the tag `extern` is a [`FormExtern`](@ref): its type is
-looked up in the registry (see [`register_extern`](@ref)) and rebuilt with
-[`deserialize_extern`](@ref). An unregistered type is an [`ExternError`](@ref),
-and a tombstone payload (`:abandoned` or `:expired`) is an
-[`ExternTombstone`](@ref).
+An object with the plain key `extern` is a [`FormExtern`](@ref): its type is
+looked up in the registry (see [`register_extern`](@ref)) and its bytes are read
+from the `resources` table lazily. An object with no `id` is a dead extern; an
+unregistered type is an [`ExternError`](@ref).
 
 """
-from_JSON(s::AbstractString) = _from_JSON(nothing, s)
-from_JSON(resolve::Function, s::AbstractString) = _from_JSON(resolve, s)
+from_JSON(s::AbstractString) = _from_JSON(nothing, s, nothing)
+from_JSON(resolve::Function, s::AbstractString) = _from_JSON(resolve, s, nothing)
 
-function _from_JSON(resolve::Union{Nothing,Function}, s::AbstractString)
-    r = _JSONReader(s, resolve)
+function _from_JSON(resolve::Union{Nothing,Function}, s::AbstractString,
+                    db::Union{Nothing,AbstractDatabase})
+    r = _JSONReader(s, resolve, db)
     v = _parsevalue!(r)
     _skipws!(r)
     _atend(r) || _jsonfail(r, "trailing data after the form")
