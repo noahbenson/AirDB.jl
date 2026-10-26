@@ -165,6 +165,11 @@ A handle to an extern's interface. A *type-level* API (from
 struct ExternAPI{T<:AbstractAirExtern}
     handle::Union{Nothing,ExternHandle{T}}
     editable::Bool
+    # Suppress the generated outer constructor: it would infer `T` from `handle`,
+    # which is ambiguous (and leaves `T` unbound) when the handle is `nothing` for
+    # a type-level API. Callers always name `T` explicitly.
+    ExternAPI{T}(handle::Union{Nothing,ExternHandle{T}}, editable::Bool) where {T} =
+        new{T}(handle, editable)
 end
 
 # `api.call(op, args)` is the interface the user sees; expose `call` as a bound
