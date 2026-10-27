@@ -10,6 +10,10 @@
 #    inside the quotes says which: `'` for a string and `:` for a symbol.
 #  * A `Float64` is written as a plain number but always with a decimal point or
 #    an exponent, since a bare integer would read back as an `Int64`.
+#  * A non-finite `Float64` has no JSON number, so it is written as the string
+#    `"#inf"`, `"#-inf"`, or `"#nan"`. No other value is written with a leading
+#    `#`, so the marker cannot collide with a string (`'`), a symbol (`:`), or a
+#    form link (`@`).
 #  * A complex number has no JSON equivalent, so it is written as the object
 #    `{"re": …, "im": …}` — always, even when the imaginary part is zero.
 #
@@ -57,13 +61,26 @@ _jsonvalue(io::IO, x::Symbol) = _jsonstring(io, string(x), ':')
 # `print`, not `show`: `show(1.5)` writes `1.5` but `show(1.5f0)` would write
 # `1.5f0`, which is not JSON. A float is always written with a point or an
 # exponent, so it never reads back as an integer.
-_jsonvalue(io::IO, x::Float64) = print(io, x)
+#
+# JSON has no infinity or NaN, and PostgreSQL rejects the bare words as invalid
+# JSON, so a non-finite value is written as a marked string instead. The `#`
+# marker is free: every string is written with `'`, every symbol with `:`, and
+# every link with `@`.
+function _jsonvalue(io::IO, x::Float64)
+    isfinite(x) && return print(io, x)
+    isnan(x) && return print(io, "\"#nan\"")
+    return print(io, x > 0 ? "\"#inf\"" : "\"#-inf\"")
+end
 # Always the object, even when the imaginary part is zero: `ComplexF64(1, 0)` and
 # `Float64(1)` are different values, and a plain number would read back as the
-# latter.
+# latter. The parts go through `_jsonvalue` so that a non-finite component is
+# encoded like any other float.
 function _jsonvalue(io::IO, x::ComplexF64)
-    print(io, "{\"re\": ", real(x), ", \"im\": ", imag(x), "}")
-    return nothing
+    print(io, "{\"re\": ")
+    _jsonvalue(io, real(x))
+    print(io, ", \"im\": ")
+    _jsonvalue(io, imag(x))
+    return print(io, "}")
 end
 
 function _jsonvalue(io::IO, fc::FormContainer)
@@ -117,7 +134,10 @@ container (or an extern — see below). A scalar form is written as its bare lea
 A `String` and a `Symbol` are both written as JSON strings, with the first
 character inside the quotes saying which: `'` for a string and `:` for a symbol.
 A `Float64` is a plain number, always with a decimal point or an exponent so that
-it reads back as a float rather than as an integer. A complex number has no JSON
+it reads back as a float rather than as an integer. A non-finite `Float64` —
+`Inf`, `-Inf`, or `NaN` — has no JSON number, so it is written as the string
+`"#inf"`, `"#-inf"`, or `"#nan"`; the `#` marker cannot be confused with a string
+(`'`), a symbol (`:`), or a link (`@`). A complex number has no JSON
 equivalent and is written as `{"re": …, "im": …}`, always, even when its
 imaginary part is zero. A [`VolatileForm`](@ref) is written as the string
 `"@<uuid>"`; it is never expanded, so cyclic links are safe to write. A
@@ -314,16 +334,23 @@ function _parsenumber!(r::_JSONReader)
 end
 
 # A JSON string carries its own kind in its first character: `'` for a string,
-# `:` for a symbol, and `@` for a volatile-form link. Anything else is a mistake
-# rather than a value, since the writer never produces one.
+# `:` for a symbol, `@` for a volatile-form link, and `#` for a non-finite float
+# (`#inf`, `#-inf`, `#nan`). Anything else is a mistake rather than a value,
+# since the writer never produces one.
 function _parseleafstring!(r::_JSONReader)
     text = _parsestring!(r)
     isempty(text) &&
-        _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol) or @ (a form link)")
+        _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link) or # (a non-finite float)")
     marker = text[1]
     rest = SubString(text, nextind(text, 1))
     (marker == '\'') && return String(rest)
     (marker == ':') && return Symbol(rest)
+    if marker == '#'
+        rest == "inf" && return Inf
+        rest == "-inf" && return -Inf
+        rest == "nan" && return NaN
+        _jsonfail(r, "\"#$rest\" is not a special float")
+    end
     if marker == '@'
         (r.resolve === nothing) &&
             _jsonfail(r, "a form link (@$rest) needs a Database to be resolved")
@@ -334,7 +361,7 @@ function _parseleafstring!(r::_JSONReader)
         end
         return r.resolve(id)
     end
-    _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol) or @ (a form link), " *
+    _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link) or # (a non-finite float), " *
                  "not '$marker'")
 end
 

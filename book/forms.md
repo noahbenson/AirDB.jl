@@ -179,7 +179,9 @@ A container is written as the two-element list `[seq, map]`, and a scalar form a
 its bare leaf, which makes the format self-describing. Strings and symbols are
 both JSON strings, told apart by the first character inside the quotes (`'` for a
 string, `:` for a symbol); a float always carries a point or exponent; and a
-complex number is written as `{"re": …, "im": …}`.
+complex number is written as `{"re": …, "im": …}`. JSON has no infinity or NaN,
+so a non-finite float is written as the marked string `"#inf"`, `"#-inf"`, or
+`"#nan"`:
 
 ```julia
 using AirDB: to_JSON, from_JSON
@@ -188,6 +190,8 @@ to_JSON(form("widget", 1, 2.5))   # "[[\"'widget\", 1, 2.5], {}]"
 to_JSON(form(a = 1))              # "[[], {\":a\": 1}]"
 to_JSON(Form(5))                  # "5"
 to_JSON(Form("abc"))              # "\"'abc\""
+to_JSON(Form(Inf))                # "\"#inf\""
+to_JSON(Form(ComplexF64(NaN, 0))) # "{\"re\": \"#nan\", \"im\": 0.0}"
 
 from_JSON("[[\"'widget\", 1, 2.5], {}]") == form("widget", 1, 2.5)   # true
 from_JSON("5") == Form(5)         # true — a bare scalar is a scalar form

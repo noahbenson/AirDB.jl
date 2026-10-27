@@ -138,6 +138,25 @@ end
             @test res2[1, 1] == UInt8['8']
         end
 
+        @testset "non-finite floats survive JSONB" begin
+            # JSONB (like JSON) has no Inf/NaN, so these are stored as marked
+            # strings; a bare `Inf` would be rejected by PostgreSQL.
+            vf = VolatileForm(db, a = Inf, b = -Inf, c = NaN, z = ComplexF64(Inf, -Inf))
+            AirDB.sync(db)
+            payload = _current_payload(conn, vf.id)
+            @test occursin("\"#inf\"", payload)
+            @test occursin("\"#-inf\"", payload)
+            @test occursin("\"#nan\"", payload)
+            id = vf.id
+            vf = nothing
+            GC.gc(); GC.gc()
+            r = get_form(db, id)[]
+            @test value(r[:a]) === Inf
+            @test value(r[:b]) === -Inf
+            @test isnan(value(r[:c]))
+            @test value(r[:z]) == ComplexF64(Inf, -Inf)
+        end
+
         @testset "metadata and history" begin
             # a current-only form stores metadata but never appends history
             m = VolatileForm(db, form(a = 1); metadata = form(v = 1), history = false)
