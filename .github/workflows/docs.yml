@@ -1,12 +1,11 @@
 name: Docs
 
-# Builds both documentation sites and deploys them to GitHub Pages together: the
-# Documenter API reference (`docs/`) at the root, and the Jupyter Book 2 / MyST
-# guide (`book/`) under `/book/`.
+# Builds the one MyST/Jupyter Book site under `docs/` — the written guide plus
+# the API reference generated from the package docstrings — and deploys it to
+# GitHub Pages at the project root. Pull requests build but do not deploy.
 on:
   push:
     branches: [main]
-    tags: ['*']
   # Deliberately not restricted to PRs targeting `main`: PRs stacked on another
   # feature branch need CI too.
   pull_request:
@@ -22,35 +21,50 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write
-      statuses: write
     steps:
       - uses: actions/checkout@v4
 
-      # The Documenter API reference, deployed to the root of the site. It also
-      # owns the versioned subdirectories (`/stable/`, `/dev/`, `/v0.1.0/`).
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1'
+          version: '1.10'
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-docdeploy@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
 
-      # The written guide, deployed to `/book/`. `keep_files` leaves the
-      # Documenter site above untouched.
+      # The API pages are generated from the package's docstrings and are not
+      # committed; `--strict` fails on a missing or duplicated entry.
+      - name: Generate the API reference
+        run: julia --project=. docs/scripts/generate_api.jl --strict
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # The project site is served at /AirDB.jl (the github.io URL redirects to
+      # the custom domain with the same path), so asset and navigation links
+      # need that base.
       - name: Build the book
-        working-directory: book
-        run: npx -y mystmd@latest build --html
-      - name: Deploy the book to /book/
-        if: github.event_name != 'pull_request'
+        working-directory: docs
+        env:
+          BASE_URL: /AirDB.jl
+        run: npx -y mystmd@1.12.0 build --html
+
+      # MyST 1.12 has no site-URL option: rewrite the sitemap's local origin.
+      - name: Fix the sitemap origin
+        working-directory: docs/_build/html
+        run: |
+          for f in sitemap.xml sitemap_style.xsl; do
+            [ -f "$f" ] && sed -i 's|http://localhost:[0-9]*|https://nben.net/AirDB.jl|g' "$f"
+          done
+
+      - name: Check internal links
+        run: julia --project=. docs/scripts/check_links.jl
+
+      # `force_orphan` replaces the whole tree, removing the old Documenter
+      # `/dev/` and the old book `/book/` along with it.
+      - name: Deploy
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: book/_build/html
-          destination_dir: book
-          keep_files: true
+          publish_dir: docs/_build/html
+          force_orphan: true

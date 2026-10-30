@@ -1,0 +1,74 @@
+version: 1
+project:
+  title: AirDB.jl
+  description: A PostgreSQL-backed persistence layer built on Air.jl's STM
+  authors:
+    - name: Noah C. Benson
+  license: MIT
+  toc:
+    - file: index.md
+    - title: Getting started
+      children:
+        - file: getting-started/installation.md
+        - file: getting-started/opening-a-database.md
+        - file: getting-started/first-example.md
+    - title: Forms
+      children:
+        - file: forms/values.md
+        - file: forms/volatile-forms.md
+        - file: forms/reading-and-paths.md
+        - file: forms/updating-and-verbs.md
+        - file: forms/equality.md
+    - title: Transactions and persistence
+      children:
+        - file: transactions/stm.md
+        - file: transactions/commits-and-durability.md
+        - file: transactions/schema-and-history.md
+        - file: transactions/lazy-loading-and-cache.md
+        - file: transactions/links-between-forms.md
+        - file: transactions/named-forms.md
+        - file: transactions/metadata.md
+    - title: Live objects and externs
+      children:
+        - file: live/actors.md
+        - file: live/promises.md
+        - file: live/delays.md
+        - file: live/streams.md
+        - file: live/externs-registration.md
+        - file: live/externs-calling-and-reservations.md
+        - file: live/externs-storage-and-dead-externs.md
+    - title: Semantics
+      children:
+        - file: semantics/equivalence.md
+        - file: semantics/json.md
+    - title: Operations
+      children:
+        - file: operations/concurrency.md
+        - file: operations/failures-policies.md
+        - file: operations/failures-inspection.md
+        - file: operations/garbage-collection.md
+    - title: API reference
+      children:
+        - file: api/index.md
+        - file: api/configuration.md
+        - file: api/forms.md
+        - file: api/indexing-and-verbs.md
+        - file: api/equivalence.md
+        - file: api/json.md
+        - file: api/volatile-forms.md
+        - file: api/named-forms.md
+        - file: api/actors.md
+        - file: api/promises.md
+        - file: api/delays.md
+        - file: api/streams.md
+        - file: api/externs.md
+        - file: api/failures.md
+        - file: api/garbage-collection.md
+site:
+  template: book-theme
+  options:
+    logo_text: AirDB.jl
+    hide_footer_links: true
+    # Make the site URL match the folder structure (`getting-started/...`,
+    # `api/...`) instead of flattening every page to its basename.
+    folders: true

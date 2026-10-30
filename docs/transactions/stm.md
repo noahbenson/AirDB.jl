@@ -1,10 +1,20 @@
-# Transactions and volatile forms
+# Transactions
 
-A `VolatileForm` is a thin wrapper around an Air `Volatile{Form}`. It can be read
-at any time, but it may only be **written inside a transaction**, and when that
-transaction commits, the new value is sent to the database's writer.
+<!-- review-status: unreviewed -->
+:::{warning} Unreviewed content
+This page was written with AI assistance and has not been reviewed by a human.
+It may contain errors, omissions, or outdated information.
+:::
+
+AirDB's writes go through Air's software transactional memory. This page explains
+the transaction model from scratch; the database side — how a commit becomes a
+durable write — is the next page,
+[Commits and durability](commits-and-durability.md).
 
 ## Writing inside a transaction
+
+A `VolatileForm` is a thin wrapper around an Air `Volatile{Form}`. It can be read
+at any time, but it may only be **written inside a transaction**:
 
 ```julia
 using AirDB, Air
@@ -79,46 +89,30 @@ end
 value(widget[:n])                 # still 42 — the write never happened
 ```
 
-## How a write reaches the database
-
-AirDB intercepts the write, and — once, per transaction — arranges for the
-committed values to reach the write pipeline. Air guarantees that a message sent
-during a transaction is dispatched only if the transaction commits, and in
-commit order. So the database sees exactly the transactions that succeeded, in
-the order they committed, and a retried transaction never leaves a trace.
-
-```{admonition} What this means for you
-:class: tip
-You never call the writer directly, and you never write to the database by hand.
-Write forms inside `@tx`, and AirDB does the rest. Use `AirDB.sync(db)` only when
-something outside the process needs to observe the write.
-```
-
 ## Reading inside a transaction
 
 Reading a form inside a transaction registers an Air read, so the transaction
-sees a consistent value and will be re-run if it changes. A form that has not yet
-been loaded from the database is loaded on first access — that is ordinary lazy
-loading (see [Persistence](persistence.md)), and it is safe to do inside a
-transaction.
+sees a consistent value and will be re-run if it changes. A form that has not
+yet been loaded from the database is loaded on first access; that is ordinary
+lazy loading (see
+[Lazy loading and the cache](lazy-loading-and-cache.md)), and it is safe inside
+a transaction.
 
 ```julia
 @tx begin
     current = value(widget[:n])   # read (and register)
-    widget[:n] = current + 1 # write
+    widget[:n] = current + 1      # write
 end
 ```
 
-## Volatile forms link to one another
+## Read-your-writes and durability
 
-Because a form may hold a `VolatileForm`, forms compose into a tree of
-independently-versioned pieces. A transaction that reaches through a child form
-reads it and (if it writes) writes only the part it actually changes; see
-[Indexing and updating](indexing.md) for the details.
+Within one process, a read always sees the latest committed value even if the
+database writer has not caught up: the live form is cached in memory. Making a
+write durable — waiting until PostgreSQL has it — is the subject of
+[Commits and durability](commits-and-durability.md).
 
-```julia
-child  = VolatileForm(db, n = 0)
-parent = VolatileForm(db, name = "parent", child = child)
+## Next
 
-@tx parent[:child, :n] = 1     # writes `child`, reads `parent`
-```
+[Commits and durability](commits-and-durability.md) follows a commit to the
+database.

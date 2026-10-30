@@ -3,7 +3,9 @@ name: TagBot
 # Creates the git tag and the GitHub release for a version once Registrator has
 # registered it, so a release needs no manual tagging. The pipeline becomes:
 #
-#     merge -> `@JuliaRegistrator register` -> TagBot tags -> docs deploy
+#     merge -> `@JuliaRegistrator register` -> TagBot tags -> tag tests
+#
+# The documentation no longer deploys from tags: it deploys from `main`.
 #
 # The canonical form of this file is upstream's `example.yml`; the inputs below
 # are the ones that need a reason here.
@@ -28,10 +30,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # A tag pushed with `GITHUB_TOKEN` does not trigger other workflows, by
-          # GitHub's design, so without this the tag would be created and the docs
-          # workflow would never run on it. The deploy key makes the push look
-          # like an ordinary one. `DOCUMENTER_KEY` is set up for the docs
-          # workflow.
+          # GitHub's design, so without this the tag would be created and the
+          # tag-triggered tests would never run on it. The deploy key makes the
+          # push look like an ordinary one. (The secret keeps its historical
+          # `DOCUMENTER_KEY` name, though the docs no longer use it.)
           ssh: ${{ secrets.DOCUMENTER_KEY }}
           # The release body points at the hand-written changelog rather than
           # restating it. TagBot's default is to generate one from the merged

@@ -1,5 +1,11 @@
 # Concurrency
 
+<!-- review-status: unreviewed -->
+:::{warning} Unreviewed content
+This page was written with AI assistance and has not been reviewed by a human.
+It may contain errors, omissions, or outdated information.
+:::
+
 AirDB is built for many threads sharing data. The model is simple: **many readers
 and writers, one ordered writer**.
 
@@ -30,25 +36,9 @@ value(counter[:n])                 # 50 — every increment committed exactly on
 when that many committed batches are still unwritten. `encoder_tasks` controls
 the encoding pool (the default is `max(1, min(4, nthreads()-1))`).
 
-```julia
-counter = VolatileForm(db, n = 0)
-AirDB.sync(db)
-
-@sync for _ in 1:50
-    Threads.@spawn tx(() -> (counter[:n] = value(counter[:n]) + 1))
-end
-AirDB.sync(db)
-
-value(counter[:n])                 # 50 — every increment committed exactly once
-```
-
 Under contention Air re-runs transactions that lose a race, so the *final* value
 is correct even though the bodies run more than once. The history reflects only
 the commits that succeeded, one row each.
-
-```julia
-# form_history has one new row per successful commit, versions in order
-```
 
 Run Julia with more than one thread to see real contention:
 
@@ -65,7 +55,7 @@ between kinds is only which operations are staged.
 
 | object | inside a transaction | outside a transaction | when the database write is sent |
 | --- | --- | --- | --- |
-| `VolatileForm` | reads and writes are transactional; a write is staged | a write raises | on commit (or immediately, written outside a transaction) |
+| `VolatileForm` | reads and writes are transactional; a write is staged | a write raises | on commit (subject to batching) |
 | metadata (any kind) | `set_metadata!` is staged and visible to the transaction; reads are validated too | `set_metadata!` raises; reads are immediate | on commit |
 | `ActorForm` | `send` is deferred until commit | `send` runs on the actor at once | when the actor applies the update |
 | `PromiseForm` | `put!`/`fail!` are staged and visible to the transaction; reading an unsettled promise raises | settle and read at once (a read waits) | on commit (or immediately outside) |
@@ -123,3 +113,9 @@ concurrency: a form with an unsaved change is always still in memory.
 n = value(counter[:n])
 @tx counter[:n] = n + 1
 ```
+
+## Next
+
+[Failure policies](failures-policies.md) decide what happens when a database
+write cannot be saved.
+

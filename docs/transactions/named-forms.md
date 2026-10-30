@@ -1,17 +1,23 @@
 # Named forms
 
+<!-- review-status: unreviewed -->
+:::{warning} Unreviewed content
+This page was written with AI assistance and has not been reviewed by a human.
+It may contain errors, omissions, or outdated information.
+:::
+
 A project usually has a few **well-known** forms — a `"root"` holding shared
-data, a `"settings"` form, a per-user entry point. Rather than pass UUIDs around,
-give a form a name.
+data, a `"settings"` form, a per-user entry point. Rather than pass UUIDs
+around, give a form a name.
 
 A name is just an **alias**: it lives in a `form_name` table, and the form it
 points to still has its own UUID and its own rows in `form_history` and
 `form_current`. The table is small, so a `Database` keeps it **in memory** as a
-`PDict{String,VolatileForm}` — and, because names are almost always changed inside
-a transaction, that `PDict` lives in an Air **`Volatile`**. A change to it is
-therefore transactional: it commits with the surrounding transaction (or in one of
-its own) and is retried or discarded with it, just like the form data, while the
-database write is scheduled through the writer in the same commit.
+`PDict{String,VolatileForm}` — Air's immutable dictionary — and, because names
+are almost always changed inside a transaction, that `PDict` lives in an Air
+**`Volatile`**. A change to it is therefore transactional: it commits with the
+surrounding transaction and is retried or discarded with it, like any other
+write. See [Transactions](stm.md).
 
 ## Looking a form up by name
 
@@ -36,7 +42,8 @@ named_form(db, :root; create = nothing)   # Symbol and String agree
 
 ## Creating a named form
 
-With `create = true`, a new form is created and registered when the name is free:
+With `create = true`, a new form is created and registered when the name is
+free:
 
 ```julia
 root = named_form(db, "root"; create = true, value = form(version = 1))
@@ -51,8 +58,8 @@ created. It may be:
 - anything a form can be made from, such as a number — converted, so `5` becomes
   `Form(5)`;
 - no value (the default) — an empty container;
-- an existing `VolatileForm` — in which case **no new form is made**, and the name
-  is simply pointed at the given form.
+- an existing `VolatileForm` — in which case **no new form is made**, and the
+  name is simply pointed at the given form.
 
 ```julia
 named_form(db, "a"; create = true, value = form(x = 1))  # holds Form(x=1)
@@ -64,14 +71,19 @@ named_form(db, "d"; create = true, value = shared)       # aliases `shared`
 named_form(db, "d") === shared                           # true — the same object
 ```
 
-## Renaming
+## Renaming and deleting
 
-`name_form!` registers a form under a name, overwriting whatever was there:
+`name_form!` registers a form under a name, overwriting whatever was there;
+`delete_name!` releases the name:
 
 ```julia
 name_form!(db, "current", some_form)
 name_form!(db, "current", another_form)   # now points at another_form
+delete_name!(db, "current")               # the name is free again
 ```
+
+Deleting a name does not delete the form; the form keeps its rows and can be
+reached by its UUID.
 
 ## The whole table
 
@@ -98,12 +110,10 @@ value(named_form(db, "root")[:version])   # 1
 
 ## Transactions
 
-The name table is a `Volatile`, so registering or renaming a form is
+The name table is a `Volatile`, so registering, renaming, or deleting a name is
 transactional. `named_form` with `create = true` and `name_form!` join the
-caller's transaction if there is one, and otherwise run in a transaction of their
-own — so you can call them anywhere.
-
-Inside a transaction, the registration commits with everything else:
+caller's transaction if there is one, and otherwise run in a transaction of
+their own — so you can call them anywhere.
 
 ```julia
 @tx begin
@@ -112,7 +122,7 @@ Inside a transaction, the registration commits with everything else:
 end
 ```
 
-and, just as importantly, it is **discarded if the transaction does not commit**:
+and the change is **discarded if the transaction does not commit**:
 
 ```julia
 try
@@ -127,10 +137,7 @@ named_form(db, "temp"; create = nothing)   # nothing — the registration never 
 
 Reading the table inside a transaction registers a read of it, so a transaction
 that looks a name up is retried if another transaction changes the table — the
-same optimistic rule that governs everything else in Air.
-
-Two transactions that register names at once are serialized by Air's conflict
-detection, so the table stays consistent without any lock of our own.
+same optimistic rule as every other write. See [Transactions](stm.md).
 
 ## The alias table
 
@@ -141,5 +148,10 @@ CREATE TABLE form_name (
 );
 ```
 
-The primary key keeps names unique, and the foreign key keeps every name pointing
-at a real form.
+The primary key keeps names unique, and the foreign key keeps every name
+pointing at a real form.
+
+## Next
+
+[Metadata](metadata.md) describes the owner/ACL blob every database-backed kind
+can carry.

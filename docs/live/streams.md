@@ -1,4 +1,10 @@
-# Stream forms
+# Streams
+
+<!-- review-status: unreviewed -->
+:::{warning} Unreviewed content
+This page was written with AI assistance and has not been reviewed by a human.
+It may contain errors, omissions, or outdated information.
+:::
 
 A `StreamForm` is a FIFO of forms backed by an Air `Stream{Form}`. It is like a
 promise that can be written and read repeatedly: `put!` appends, `take` removes
@@ -13,7 +19,7 @@ put!(sf, form(id = 1))
 put!(sf, form(id = 2))
 
 length(sf)        # 2
-snapshot(sf)      # [Form(id=1), Form(id=2)] — a copy; nothing is removed
+snapshot(sf)      # Form[Form(id=1), Form(id=2)] — a copy; nothing is removed
 take(sf)          # Form(id=1)
 take(sf)          # Form(id=2)
 ```
@@ -48,14 +54,14 @@ blocking.
 
 ## Transactions
 
-Air stages stream operations inside `@tx`, exactly as it does for puts and
-takes: a `put!`, `take`, or `close` inside a transaction happens only if the
-transaction commits, the transaction that staged it sees its own writes and
-reads, and a concurrent change makes the attempt retry. A blocking operation on
-a stream created in the current transaction raises `Air.StreamDeadlock` — no
-other task can reach it until the commit — and a stream first *loaded* in the
-transaction is treated the same way. AirDB likewise sends the stream's updated
-contents to the database writer only if the transaction commits.
+Air stages stream operations inside `@tx`: a `put!`, `take`, or `close` inside a
+transaction happens only if the transaction commits, the transaction that staged
+it sees its own writes and reads, and a concurrent change makes the attempt
+retry. A blocking operation on a stream created in the current transaction
+raises `Air.StreamDeadlock` — no other task can reach it until the commit — and
+a stream first *loaded* in the transaction is treated the same way. AirDB sends
+the stream's updated contents to the database writer only if the transaction
+commits. See [Transactions](../transactions/stm.md).
 
 ## Commit state
 
@@ -75,10 +81,22 @@ by id is always `:live`.
 ## Persistence
 
 A stream's queued forms, its `maxsize`, whether it is closed, and its metadata
-are stored in `form_stream`, one row per stream. Every successful `put!`,
-`take`, or `close` sends an updated snapshot to the writer, so the row follows
-the queue with the usual delayed-write lag; a reload restores the contents and
-the stream's state.
+are stored in `form_stream`, one row per stream:
+
+```sql
+CREATE TABLE form_stream (
+    stream_id  UUID        PRIMARY KEY,
+    items      JSONB       NOT NULL DEFAULT '[]',  -- the queued forms
+    maxsize    INTEGER,                            -- NULL = unbounded
+    closed     BOOLEAN     NOT NULL DEFAULT FALSE,
+    metadata   JSONB,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+```
+
+Every successful `put!`, `take`, or `close` sends an updated snapshot to the
+writer, so the row follows the queue with the usual delayed-write lag; a reload
+restores the contents and the stream's state.
 
 ```julia
 sf = StreamForm(db; maxsize = 3)
@@ -86,28 +104,15 @@ put!(sf, form(a = 1)); close(sf)
 AirDB.sync(db)
 
 r = get_stream(db, sf.id)     # the same object while it is alive
-r = get_stream(db, some_id)   # otherwise an unloaded stream
 snapshot(r)                   # the queued forms
 ```
 
 In JSON a stream is always a link, written `"&<uuid>"`; reading one needs a
-database. As with every database-backed kind, a stream carries optional owner
-metadata: `metadata(sf)` and `set_metadata!(sf, m)`.
+database. See [The JSON format](../semantics/json.md). A stream carries optional
+owner metadata: `metadata(sf)` and `set_metadata!(sf, m)`; see
+[Metadata](../transactions/metadata.md). Its row is swept by
+[`gc!`](../operations/garbage-collection.md) when nothing references it.
 
-## API index
+## Next
 
-```julia
-StreamForm(db; maxsize = nothing, pending_commit = false, metadata = nothing)
-get_stream(db, id)
-
-put!(sf, value; timeout = nothing, token = ...)
-take(sf; timeout = nothing, token = ...)
-close(sf)
-
-isopen(sf); length(sf); isempty(sf); isready(sf); maxsize(sf); snapshot(sf)
-
-mark_pending_commit!(sf); mark_committed!(sf); mark_aborted!(sf)
-UncommittedStream; AbortedStream
-
-metadata(sf); set_metadata!(sf, m)
-```
+[Extern types](externs-registration.md) turn to host-level values.

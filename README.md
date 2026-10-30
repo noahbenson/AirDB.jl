@@ -62,14 +62,20 @@ The test suite starts its own server with `docker compose up -d`; see
 
 ## Documentation
 
-- [The written guide](https://noahbenson.github.io/AirDB.jl/book/) — getting
-  started, forms, extern types, transactions, indexing, persistence,
-  concurrency, and failures, with worked examples.
-- [API reference](https://noahbenson.github.io/AirDB.jl/dev/api/), or
-  `?name` at the REPL. (The book also has a quick
-  [API index](https://noahbenson.github.io/AirDB.jl/book/api/).)
+- [The book](https://nben.net/AirDB.jl/) — getting started, forms, transactions
+  and persistence, live objects and extern types, semantics and operations,
+  with worked examples.
+- [API reference](https://nben.net/AirDB.jl/api/), or `?name` at the REPL.
 - [CHANGELOG.md](CHANGELOG.md) for the release history, and
   [TODO.md](TODO.md) for known limitations and future work.
+  
+## Use of AI
+
+This package was written using Claude code with the DeepSeek Flash 4.1
+model. The human author of the repository directed all design goals and
+decision and has reviewed and tested all AI-written code. Documentation was
+largely AI-written and contains attributions if the page has not been reviewed
+by a human.
 
 ## License
 

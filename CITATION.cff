@@ -16,7 +16,7 @@ authors:
 type: software
 license: MIT
 repository-code: "https://github.com/noahbenson/AirDB.jl"
-url: "https://noahbenson.github.io/AirDB.jl/"
+url: "https://nben.net/AirDB.jl/"
 version: 0.1.0
 date-released: 2026-10-30
 keywords:

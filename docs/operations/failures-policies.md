@@ -1,5 +1,11 @@
 # Failures and retries
 
+<!-- review-status: unreviewed -->
+:::{warning} Unreviewed content
+This page was written with AI assistance and has not been reviewed by a human.
+It may contain errors, omissions, or outdated information.
+:::
+
 A connection to PostgreSQL can fail at any time — a dropped socket, a restart, a
 network blip — and a particular row can be impossible to write. AirDB lets you
 choose what a permanent failure does with `failure` on the `DatabaseConfig`:
@@ -18,43 +24,23 @@ contained, and unrelated reads and writes continue.
 
 ```julia
 db = create_database(DatabaseConfig(; dbname = "airdb_test", user = "airdb",
-                                    retries = 0);      # no retries for this demo
+                                    password = "airdb", retries = 0);  # no retries here
                      overwrite = true)
 vf = VolatileForm(db, n = 1)
 AirDB.sync(db)
 
-close(AirDB._writer_conn(db))    # break the writer connection
+close(AirDB._writer_conn(db))    # test-only: force an outage (internal helper)
 @tx vf[:n] = 2
 AirDB.sync(db)                   # does not throw
 vf[]                             # Form(n=2) — the committed value is kept
 failed(db, vf.id)                # true — its row was not written
 ```
 
-Inspect and clear the failures:
-
-```julia
-write_failures(db)               # Vector{FailureRecord}, oldest first
-write_failures(db, vf.id)        # the records touching this object
-r = first(write_failures(db))
-r.error                          # the database error
-r.items[1].kind                  # :form
-r.items[1].object                # the live VolatileForm
-r.items[1].write                 # the pending write (value, metadata, history, txid)
-
-# Acknowledge, and optionally re-stage the current in-memory value:
-clear_write_failure!(db, vf.id; retry = true)
-AirDB.sync(db)
-```
-
-`clear_write_failure!(db, id)` with the default `retry = false` only
-acknowledges the loss and unblocks loading again: a later reload reads the older
-row. With `retry = true` the object's **current** value is re-staged, so a retry
-cannot regress a newer write. `clear_write_failures!(db)` clears every record.
-
-Read errors are recorded separately, since they are not durability gaps:
-`read_failures(db)`, `read_failures(db, id)`, and `clear_read_failures!(db)`.
-Under `:isolate` a failed read raises to its caller but does not poison later
-reads.
+A quarantined batch is recorded, not lost: `write_failures(db)` lists the
+records, `failed(db, id)` says whether one object is affected, and
+`clear_write_failure!` acknowledges or retries it. Read errors are recorded
+separately with `read_failures`. The whole inspection and retry API is in
+[Inspecting failures](failures-inspection.md).
 
 ## `:abort`
 
@@ -64,12 +50,13 @@ raises. Nothing is silently lost, but the database is unusable until it is
 replaced.
 
 ```julia
-cfg = DatabaseConfig(; dbname = "airdb_test", user = "airdb", failure = :abort)
+cfg = DatabaseConfig(; dbname = "airdb_test", user = "airdb",
+                      password = "airdb", failure = :abort)
 db = create_database(cfg; overwrite = true)
 vf = VolatileForm(db, n = 1)
 AirDB.sync(db)
 
-close(AirDB._writer_conn(db))    # break the writer connection
+close(AirDB._writer_conn(db))    # test-only: force an outage (internal helper)
 @tx vf[:n] = 2
 AirDB.sync(db)
 # ERROR: AirDB database error: ... (1 unsaved write(s))
@@ -90,6 +77,7 @@ pipeline meanwhile. When the budget is spent the batch is quarantined, as under
 cfg = DatabaseConfig(;
     dbname     = "airdb_test",
     user       = "airdb",
+    password   = "airdb",
     failure    = :retry,
     retries    = 5,          # retry at most 5 times ...
     retry_time = 30.0,       # ... or for at most 30 seconds (whichever first)
@@ -100,7 +88,7 @@ db = create_database(cfg; overwrite = true)
 
 vf = VolatileForm(db, n = 1)
 AirDB.sync(db)
-close(AirDB._writer_conn(db))    # break the writer connection
+close(AirDB._writer_conn(db))    # test-only: force an outage (internal helper)
 @tx vf[:n] = 2
 AirDB.sync(db)                   # the writer reconnects, retries, and succeeds
 vf[:n]                           # 2
@@ -129,13 +117,13 @@ What happens after retries are exhausted is still the configured `failure`:
 `:isolate`/`:retry` quarantine the batch; `:abort` fails the database.
 
 The hook receives the `Database`, so it can inspect the unsaved work with
-[`pending_writes`](api.md), log the error, alert, or change its mind as an outage
+[`pending_writes`](../api/index.md), log the error, alert, or change its mind as an outage
 drags on.
 
 ```julia
 attempts = Ref(0)
 cfg = DatabaseConfig(;
-    dbname = "airdb_test", user = "airdb",
+    dbname = "airdb_test", user = "airdb", password = "airdb",
     failure = :retry, retry_delay = 0.05,
     on_error = (db, err) -> begin
         attempts[] += 1
@@ -150,7 +138,7 @@ A hook can also force a retry even when the configured policy is `:abort`:
 
 ```julia
 cfg = DatabaseConfig(;
-    dbname = "airdb_test", user = "airdb",
+    dbname = "airdb_test", user = "airdb", password = "airdb",
     failure = :abort,                            # otherwise fail immediately
     on_error = (db, err) -> :retry,              # ... but this hook says retry
 )
@@ -162,3 +150,9 @@ Each flush and each read has its own attempt count and clock. During a long
 outage, every read independently retries for up to `retry_time` before failing,
 and the pipeline's queue keeps growing until it recovers or gives up.
 ```
+
+## Next
+
+[Inspecting failures](failures-inspection.md) covers the records a quarantine
+leaves behind and how to clear or retry them.
+
