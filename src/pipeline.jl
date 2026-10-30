@@ -50,7 +50,7 @@ struct CloseEntry
     done::Channel{Any}
 end
 
-mutable struct WritePipeline
+mutable struct WritePipeline <: AbstractWritePipeline
     lock::ReentrantLock
     cond::Threads.Condition
     entries::Dict{Int,Any}
@@ -62,13 +62,13 @@ mutable struct WritePipeline
     flush_due::Bool
     stop::Bool
     conn::LibPQ.Connection
-    db::Any
+    db::Database
     last_error::Union{Nothing,Exception}
     encoders::Vector{Task}
     writer::Union{Nothing,Task}
 end
 
-function _start_pipeline!(db::AbstractDatabase, conn, txseq::Integer)
+function _start_pipeline!(db::Database, conn, txseq::Integer)
     lk = ReentrantLock()
     pipe = WritePipeline(lk, Threads.Condition(lk), Dict{Int,Any}(), Int[],
                          1, 1, 0, 0, false, false, conn, db, nothing, Task[], nothing)
@@ -79,7 +79,11 @@ function _start_pipeline!(db::AbstractDatabase, conn, txseq::Integer)
 end
 
 # The writer connection, for tests and diagnostics.
-_writer_conn(db::Database) = db.pipeline.conn
+function _writer_conn(db::Database)
+    pipe = db.pipeline
+    pipe === nothing && throw(ArgumentError("the database has no write pipeline"))
+    return (pipe::WritePipeline).conn
+end
 
 # The signal a stopped pipeline gives to a waiting barrier/GC/close job.
 struct PipelineStop

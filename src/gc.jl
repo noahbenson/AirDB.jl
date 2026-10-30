@@ -12,7 +12,7 @@
 # live in-memory objects (the weak caches and the extern registry). Everything
 # else is reachable only through links.
 #
-# The sweep runs as one message on the writer actor. That actor is sequential, so
+# The sweep runs as one job on the writer task. That task is sequential, so
 # every earlier write is already applied and every later write queues behind the
 # sweep: the marking pass sees a consistent snapshot without any extra locking,
 # and reads continue on the read pool. A per-database `gclock` closes the one
@@ -247,7 +247,7 @@ sweep removes unreachable rows from `form_current`, `form_actor_current`,
 `form_promise`, and `resources`, and deletes the history rows of the swept
 objects; live objects keep their full history.
 
-The sweep runs as one message on the database's writer actor, so it sees a
+The sweep runs as one job on the database's writer task, so it sees a
 consistent snapshot and blocks only writes (reads continue). Object loading is
 serialized with it, so a row cannot be swept while it is being loaded. Names are
 never removed here; use [`delete_name!`](@ref) to release one.

@@ -173,7 +173,6 @@ function _receive!(st::MemoryActorState, b::WriteBatch)
     return st
 end
 
-_flush!(st::MemoryActorState) = st              # nothing is ever queued
 _reconnect_writer!(::MemoryActorState) = nothing
 
 function _read_current(db::MemoryDatabase, id::UUID)

@@ -7,7 +7,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Under `0.x`, SemVer puts breaking changes in the minor position and compatible
 fixes in the patch position, which is how later versions will be chosen.
 
-## [0.1.0] - 2026-10-29
+## [0.1.0] - 2026-10-30
 
 The first release. AirDB builds a PostgreSQL-backed persistence layer on top of
 [Air.jl](https://github.com/noahbenson/Air.jl)'s software transactional memory.

@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use AirDB.jl in your work, please cite it using the metadata below."
+title: "AirDB.jl: a PostgreSQL-backed persistence layer for Air.jl"
+abstract: >-
+  AirDB.jl keeps shared application state in memory as immutable forms and
+  persists every committed change to PostgreSQL in transaction order, using
+  Air.jl's software transactional memory. It provides database-backed volatile,
+  actor, promise, stream, and delay forms, a registered extern-type system for
+  host-level values, owner/ACL metadata, garbage collection, and a fault-isolating
+  write pipeline.
+authors:
+  - family-names: Benson
+    given-names: Noah C.
+    email: nben@uw.edu
+    affiliation: University of Washington
+type: software
+license: MIT
+repository-code: "https://github.com/noahbenson/AirDB.jl"
+url: "https://noahbenson.github.io/AirDB.jl/"
+version: 0.1.0
+date-released: 2026-10-30
+keywords:
+  - Julia
+  - PostgreSQL
+  - software transactional memory
+  - persistence
+  - immutable data

@@ -428,7 +428,7 @@ end
 
 # The handles referenced by the form currently being encoded, so the writer can
 # store their bytes before it writes any form that names them. The set lives in
-# task-local storage because encoding always runs on one task (the writer actor
+# task-local storage because encoding always runs on one task (an encoder task
 # or a caller of `to_JSON`).
 const _REF_KEY = :AirDBReferencedExterns
 function _refset()

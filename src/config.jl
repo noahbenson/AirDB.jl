@@ -24,12 +24,12 @@ set, is a libpq connection string or URI used verbatim (as built by the
 `url` method), and the structured fields are ignored.
 
 * `readpoolsize` — how many read connections to keep in the pool.
-* `max_batch` — how many committed updates the writer actor accumulates before
+* `max_batch` — how many committed updates the pipeline accumulates before
   flushing. `1` (the default) writes every commit as soon as it arrives.
 * `failure` — what to do when an operation fails permanently:
   * `:isolate` (the default) — quarantine the failing batch, record it (see
     [`write_failures`](@ref)), and keep serving unrelated reads and writes.
-  * `:abort` — the writer actor is poisoned and every database operation raises.
+  * `:abort` — the write pipeline stops and every database operation raises.
   * `:retry` — a compatibility alias for the isolated retry path.
   `:isolate` and `:retry` retry within the budget before quarantining; `:abort`
   gives up immediately.

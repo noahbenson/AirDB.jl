@@ -3,8 +3,8 @@
 #
 # `VolatileForm`: a form that persists itself. It wraps an Air `Volatile{Form}`,
 # carries a stable UUID, and belongs to a `Database`. A write to it must happen
-# inside an Air transaction; when that transaction commits, the writer actor is
-# sent the new form and saves it.
+# inside an Air transaction; when that transaction commits, the new form is sent
+# to the write pipeline and saved.
 #
 # A `VolatileForm` is loaded lazily: constructing one from the database records
 # only its id, and the form body is read the first time the value is requested.

@@ -2,8 +2,9 @@
 # database.jl
 #
 # The `Database` object: a configured connection to a PostgreSQL server, a pool
-# of read connections, a weak cache of live forms, and a single writer actor that
-# persists committed updates in commit order.
+# of read connections, a weak cache of live forms, an intake actor, an encoder
+# pool, and a single ordered writer task that persists committed updates in commit
+# order.
 #
 # MIT License
 # Copyright (c) 2020-2026 Noah C. Benson
@@ -275,8 +276,9 @@ Base.showerror(io::IO, e::DatabaseError) =
     Database
 
 A configured connection to a PostgreSQL database, plus the machinery AirDB keeps
-around it: a pool of read connections, a weak cache of live `VolatileForm`s, and
-a single writer actor that persists committed updates in global commit order.
+around it: a pool of read connections, a weak cache of live `VolatileForm`s, an
+intake actor, an encoder pool, and a single ordered writer task that persists
+committed updates in global commit order.
 
 Create one with [`create_database`](@ref) (to initialize a new database) or
 [`open_database`](@ref) (to open an existing one).
@@ -299,7 +301,7 @@ mutable struct Database <: AbstractDatabase
     readfailures::Vector{ReadFailure}
     faillock::ReentrantLock
     closed::Bool
-    pipeline::Any                                 # the WritePipeline (pipeline.jl)
+    pipeline::Union{Nothing,AbstractWritePipeline}  # the WritePipeline (pipeline.jl)
 end
 
 _check_open(db::AbstractDatabase) = db.closed && throw(ArgumentError("the database is closed"))
@@ -515,11 +517,12 @@ from_JSON(db::AbstractDatabase, s::AbstractString) =
     _from_JSON(id -> get_form(db, id), s, db)
 
 # Build a Database from a config whose schema already exists: open the writer
-# connection, start the writer actor, and fill the read pool.
+# connection, start the intake actor and the write pipeline, and fill the read
+# pool.
 function _make_database(config::DatabaseConfig)
     wconn = LibPQ.Connection(_conninfo(config))
     txseq = _read_max_txid(wconn)
-    st = FormActorState(config, txseq, nothing)
+    st = FormActorState(txseq, nothing)
     actor = Actor{FormActorState}(st)
     db = Database(config, actor, Channel{LibPQ.Connection}(config.readpoolsize),
                   Dict{UUID,WeakRef}(), Dict{UUID,WeakRef}(), Dict{UUID,WeakRef}(),
@@ -635,7 +638,8 @@ end
     status(db::Database) -> (npending, error)
 
 The number of updates queued for the writer but not yet written, and the last
-error the writer saw (or `nothing`).
+error the writer saw (or `nothing`). The intake is asynchronous, so a commit
+that has just returned may not be counted yet; [`sync`](@ref) waits for it.
 """
 function status(db::Database)
     pipe = db.pipeline

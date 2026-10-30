@@ -1,15 +1,14 @@
 ################################################################################
 # actor.jl
 #
-# The write path. Every database has one Air `Actor` that owns the writer
-# connection; committed updates are sent to it and written in commit order.
+# The write path's intake. Every database has one Air `Actor` that receives one
+# message per committed transaction and hands its batch to the write pipeline
+# (pipeline.jl), which encodes it after commit and writes it in commit order on
+# the ordered writer task.
 #
-# One message is sent per committed Air transaction, carrying every form it
-# changed and every name it registered, so a commit lands in the database as a
-# single atomic write. The trick is that the message's function captures a
-# mutable batch that later writes in the same transaction append to; the actor
-# only ever sees it after the transaction commits, by which point it holds the
-# final contents.
+# The message's function captures a mutable batch that later writes in the same
+# transaction append to; the actor only ever sees it after the transaction
+# commits, by which point it holds the final contents.
 #
 # Retry safety: Air's `tx_clear!` empties the transaction's actor table at the
 # start of every attempt (Air `src/TX.jl:616-622`), so `actor in currtx().actors`
@@ -138,12 +137,11 @@ and a reference to the database's write pipeline. The actor only enqueues
 committed batches; encoding and database writes happen on the pipeline's tasks.
 """
 mutable struct FormActorState
-    config::DatabaseConfig
     txseq::Int64
     db::Union{Nothing,Database}
 end
 
-# The per-task map from writer actor to the batch for the current attempt. It
+# The per-task map from intake actor to the batch for the current attempt. It
 # lives in task-local storage rather than an Air `Var`, whose `setindex!` is
 # disabled and whose mutable default would be shared across tasks.
 const _ACC_KEY = :AirDBAccumulators

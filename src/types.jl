@@ -48,6 +48,10 @@ abstract type AbstractAirExtern end
 # `Database` and `MemoryDatabase` subtype.
 abstract type AbstractDatabase end
 
+# The write pipeline's supertype, so a `Database` can name it before
+# `WritePipeline` is defined (pipeline.jl is included after database.jl).
+abstract type AbstractWritePipeline end
+
 # The metadata a database-backed object carries: a form, or `nothing` for none.
 # It lives in an Air `Volatile` on every kind, so a metadata edit is
 # transactional like any other write: Air rolls it back on abort, applies it at
@@ -193,7 +197,7 @@ A [`Form`](@ref) that is stored in a PostgreSQL database and kept in sync with
 it. A `VolatileForm` is a thin wrapper around an Air `Volatile{Form}`: it can be
 read at any time, but it may only be *written* inside an Air transaction
 (`@tx`/`tx`), and when that transaction commits the new value is sent to the
-database's writer actor.
+database's write pipeline.
 
 Every `VolatileForm` has a stable `UUID`, and forms may embed other
 volatile forms (written `"@<uuid>"` in JSON). Volatile forms are cached per

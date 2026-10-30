@@ -1,5 +1,8 @@
 # AirDB.jl
 
+[![Tests](https://github.com/noahbenson/AirDB.jl/actions/workflows/tests.yml/badge.svg)](https://github.com/noahbenson/AirDB.jl/actions/workflows/tests.yml)
+[![Docs](https://github.com/noahbenson/AirDB.jl/actions/workflows/docs.yml/badge.svg)](https://github.com/noahbenson/AirDB.jl/actions/workflows/docs.yml)
+
 A PostgreSQL-backed persistence layer built on
 [Air.jl](https://github.com/noahbenson/Air.jl)'s software transactional memory
 (STM).
@@ -62,8 +65,9 @@ The test suite starts its own server with `docker compose up -d`; see
 - [The written guide](https://noahbenson.github.io/AirDB.jl/book/) — getting
   started, forms, extern types, transactions, indexing, persistence,
   concurrency, and failures, with worked examples.
-- [API reference](https://noahbenson.github.io/AirDB.jl/book/api.html), or
-  `?name` at the REPL.
+- [API reference](https://noahbenson.github.io/AirDB.jl/dev/api/), or
+  `?name` at the REPL. (The book also has a quick
+  [API index](https://noahbenson.github.io/AirDB.jl/book/api/).)
 - [CHANGELOG.md](CHANGELOG.md) for the release history, and
   [TODO.md](TODO.md) for known limitations and future work.
 
