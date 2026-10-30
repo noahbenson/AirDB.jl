@@ -1,0 +1,1 @@
+import{a as e,b as r}from"/AirDB.jl/build/_shared/chunk-7FGDXJSL.js";import"/AirDB.jl/build/_shared/chunk-GEZIJWLJ.js";import"/AirDB.jl/build/_shared/chunk-RAQ24GF6.js";export{e as ArchitectureModule,r as createArchitectureServices};
