@@ -46,6 +46,9 @@ AirDB.register_extern(:bad, BadData;
 # exercised without disturbing the types above.
 struct TmpExternA <: AbstractAirExtern end
 struct TmpExternB <: AbstractAirExtern end
+struct TmpExternC <: AbstractAirExtern end
+struct EqTmpA <: AbstractAirExtern end
+struct EqTmpB <: AbstractAirExtern end
 
 _call(api, op::Symbol, args = form()) = api.call(Form(op), args)
 _ctor(name::Symbol) = Form(name)
@@ -59,6 +62,13 @@ _ctor(name::Symbol) = Form(name)
         AirDB.register_extern(:tmp, TmpExternA)
         @test_throws ExternError AirDB.register_extern(:tmp, TmpExternB)
         @test_throws ExternError AirDB.register_extern(:tmp2, TmpExternA)
+        # equivalence functions must come in a pair, and only for immutable types
+        @test_throws ExternError AirDB.register_extern(:tmp3, EqTmpA;
+            immutable = true, equal = (a, b) -> true)
+        @test_throws ExternError AirDB.register_extern(:tmp4, EqTmpB;
+            immutable = true, hash = (x, h) -> h)
+        @test_throws ExternError AirDB.register_extern(:tmp5, TmpExternC;
+            equal = (a, b) -> true, hash = (x, h) -> h)
     end
 
     @testset "construct" begin
@@ -224,7 +234,7 @@ _ctor(name::Symbol) = Form(name)
         AirDB.sync(db)
         (reserve(c) do a; _call(a, Symbol(":bump")); end)[]
         AirDB.sync(db)
-        @test db.resources[(:counter, Symbol(":mem-test"))] == UInt8['6']
+        @test db.resources[(:counter, Symbol(":mem-test"))][1] == UInt8['6']
         close(db)
     end
 end

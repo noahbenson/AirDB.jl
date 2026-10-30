@@ -82,7 +82,7 @@ value(widget[:n])                 # still 42 — the write never happened
 ## How a write reaches the database
 
 AirDB intercepts the write, and — once, per transaction — arranges for the
-committed values to reach the writer actor. Air guarantees that a message sent
+committed values to reach the write pipeline. Air guarantees that a message sent
 during a transaction is dispatched only if the transaction commits, and in
 commit order. So the database sees exactly the transactions that succeeded, in
 the order they committed, and a retried transaction never leaves a trace.

@@ -28,28 +28,97 @@ struct AccumulatedUpdate
     history::Bool
 end
 
-# A resource's bytes, queued by a read-edit operation.
+# A resource's bytes, queued by a read-edit operation. `handle` is the live
+# extern handle when one is known, so the writer can mark its row present.
 struct PendingResource
     type::Symbol
     id::Symbol
     data::Vector{UInt8}
+    metadata::Union{Nothing,Form}
+    handle::Union{Nothing,ExternHandle}
+end
+
+# One actor value, queued by the actor's post-processor.
+struct AccumulatedActor
+    af::ActorForm
+    value::Form
+    history::Bool
+    metadata::Union{Nothing,Form}
+end
+
+# A promise settlement (delivery or failure), queued by the promise's callback.
+struct PendingPromise
+    id::UUID
+    state::Symbol                 # :delivered | :failed
+    payload::Form                 # the value or the error form
+    metadata::Union{Nothing,Form}
+end
+
+# A stream snapshot, queued by an operation or a reference.
+struct PendingStream
+    sf::StreamForm
+    items::Vector{Form}
+    maxsize::Union{Nothing,Int}
+    closed::Bool
+    metadata::Union{Nothing,Form}
+end
+
+# A metadata-only edit, queued by `set_metadata!`. The edit itself is already in
+# the object's metadata volatile (Air applies it at commit); this only makes the
+# database row follow.
+struct PendingMetadata
+    kind::Symbol                  # :form | :actor | :promise | :stream | :extern
+    id::Any                       # a UUID, or a `(type, id)` pair for externs
+    metadata::Union{Nothing,Form}
+end
+
+# A name-table operation. Order matters: the last operation for a name wins, so
+# `delete_name!` followed by `name_form!` leaves the name registered.
+struct NameOp
+    op::Symbol                  # :set | :delete
+    name::String
+    id::Union{Nothing,UUID}     # the form id for :set
 end
 
 # The mutable batch a transaction's message carries: the forms it changed, the
-# names it registered, and the resource bytes it produced. Later writes in the
-# same transaction append to it, so the actor sees the final contents once the
-# transaction commits.
+# names it registered, the resource bytes it produced, the actor values it
+# updated, the promises it referenced or settled, and the metadata-only edits it
+# made. Later writes in the same transaction append to it, so the actor sees the
+# final contents once the transaction commits.
 mutable struct WriteBatch
     forms::Dict{UUID,AccumulatedUpdate}
-    names::Dict{String,UUID}
+    nameops::Vector{NameOp}
     resources::Dict{Tuple{Symbol,Symbol},PendingResource}
+    streams::Dict{UUID,PendingStream}
+    actors::Vector{AccumulatedActor}
+    promise_ensure::Dict{UUID,Union{Nothing,Form}}  # create a pending row if absent
+    promise_settlements::Dict{UUID,PendingPromise}  # deliver or fail, if pending
+    metadata::Vector{PendingMetadata}              # metadata-only edits
 end
-WriteBatch() = WriteBatch(Dict{UUID,AccumulatedUpdate}(), Dict{String,UUID}(),
-                          Dict{Tuple{Symbol,Symbol},PendingResource}())
+WriteBatch() = WriteBatch(Dict{UUID,AccumulatedUpdate}(), NameOp[],
+                          Dict{Tuple{Symbol,Symbol},PendingResource}(),
+                          Dict{UUID,PendingStream}(),
+                          AccumulatedActor[],
+                          Dict{UUID,Union{Nothing,Form}}(),
+                          Dict{UUID,PendingPromise}(), PendingMetadata[])
 _batch_empty(b::WriteBatch) =
-    isempty(b.forms) && isempty(b.names) && isempty(b.resources)
-_batch_empty!(b::WriteBatch) =
-    (empty!(b.forms); empty!(b.names); empty!(b.resources))
+    isempty(b.forms) && isempty(b.nameops) &&
+    isempty(b.resources) && isempty(b.streams) && isempty(b.actors) &&
+    isempty(b.promise_ensure) && isempty(b.promise_settlements) && isempty(b.metadata)
+_batch_empty!(b::WriteBatch) = (empty!(b.forms); empty!(b.nameops);
+                                empty!(b.resources); empty!(b.streams);
+                                empty!(b.actors);
+                                empty!(b.promise_ensure); empty!(b.promise_settlements);
+                                empty!(b.metadata))
+
+# An actor update waiting to reach the database.
+struct PendingActor
+    af::ActorForm
+    value::Form
+    history::Bool
+    metadata::Union{Nothing,Form}
+    txid::Int64
+end
 
 # A write waiting to reach the database. The `vf` field is a strong reference, so
 # a queued form cannot be collected (and reloaded) while its write is pending.
@@ -61,30 +130,17 @@ struct PendingWrite
     txid::Int64
 end
 
-# A name registration waiting to reach the database.
-struct PendingName
-    name::String
-    id::UUID
-end
-
 """
     FormActorState
 
-The value held by a database's writer `Actor`. It owns the writer connection, the
-queues of updates and name registrations not yet written, and the running
-transaction id. Holding the queues here (rather than writing immediately) is what
-lets a later policy batch several commits into one database transaction; the
-strong references in `pending` keep those forms alive until they are written.
+The value held by a database's intake `Actor`: the transaction sequence number
+and a reference to the database's write pipeline. The actor only enqueues
+committed batches; encoding and database writes happen on the pipeline's tasks.
 """
 mutable struct FormActorState
     config::DatabaseConfig
-    conn::LibPQ.Connection
-    pending::Vector{PendingWrite}
-    names::Vector{PendingName}
-    resources::Dict{Tuple{Symbol,Symbol},PendingResource}
     txseq::Int64
     db::Union{Nothing,Database}
-    last_error::Union{Nothing,Exception}
 end
 
 # The per-task map from writer actor to the batch for the current attempt. It
@@ -104,16 +160,25 @@ end
 # transaction, to a fresh batch sent immediately. Inside a transaction the send is
 # deferred until commit, so the batch is always complete when the actor sees it;
 # with no transaction the entry is added before the send.
-function _stage!(add::Function, actor::Actor)
+#
+# `db` is checked first: a poisoned `:abort` database and a closed database must
+# reject new writes here, since the intake actor itself stays alive.
+function _stage!(add::Function, actor::Actor, db::Union{Nothing,AbstractDatabase} = nothing)
+    db === nothing || _check_open(db)
+    db === nothing || _check_health(db)
     t = currtx()
     if t === nothing
+        (db === nothing || _suppress_capacity()) || _await_capacity(db)
         b = WriteBatch()
         add(b)
         send(a -> _receive!(a, b), actor)
         return nothing
     end
     holder = _accdict()
-    if !(actor in t.actors)                 # first write of this attempt
+    # `getfield(t, :actors)` is the transaction's own actor map; the property
+    # `t.actors` builds an `IdSet` of its keys on every access.
+    if !haskey(getfield(t, :actors), actor)  # first write of this attempt
+        (db === nothing || _suppress_capacity()) || _await_capacity(db)
         b = WriteBatch()
         holder[actor] = b
         send(a -> _receive!(a, b), actor)    # dispatched only on commit
@@ -125,8 +190,8 @@ end
 # Arrange for `form` — the value `vf` was just set to — to reach the database when
 # the current transaction commits (or immediately, if there is no transaction).
 function _register!(vf::VolatileForm, form::Form)
-    u = AccumulatedUpdate(vf, form, vf.metadata, vf.history)
-    _stage!(b -> (b.forms[vf.id] = u), vf.db.writeactor)
+    u = AccumulatedUpdate(vf, form, _metavalue(vf), vf.history)
+    _stage!(b -> (b.forms[vf.id] = u), vf.db.writeactor, vf.db)
     return form
 end
 
@@ -134,139 +199,243 @@ end
 # transaction commits (or immediately).
 function _register_name!(db::AbstractDatabase, name::AbstractString, id::UUID)
     key = String(name)
-    _stage!(b -> (b.names[key] = id), db.writeactor)
+    _stage!(b -> push!(b.nameops, NameOp(:set, key, id)), db.writeactor, db)
+    return nothing
+end
+
+# Arrange for the name `name` to be removed once the current transaction commits
+# (or immediately).
+function _unregister_name!(db::AbstractDatabase, name::AbstractString)
+    key = String(name)
+    _stage!(b -> push!(b.nameops, NameOp(:delete, key, nothing)), db.writeactor, db)
     return nothing
 end
 
 # Queue a read-edited resource's bytes. The bytes are captured by the caller
 # while it holds the resource's write lock.
-function _stage_resource!(db::AbstractDatabase, type::Symbol, id::Symbol, data::Vector{UInt8})
-    pr = PendingResource(type, id, data)
-    _stage!(b -> (b.resources[(type, id)] = pr), db.writeactor)
+function _stage_resource!(db::AbstractDatabase, type::Symbol, id::Symbol,
+                          data::Vector{UInt8}; metadata = nothing, handle = nothing)
+    pr = PendingResource(type, id, data, metadata, handle)
+    _stage!(b -> (b.resources[(type, id)] = pr), db.writeactor, db)
     return nothing
 end
 
-# The actor's side: take a committed batch, queue it, and flush when the queue is
-# large enough. Under the default `max_batch == 1` this writes each commit at once.
+# A metadata-only edit: no payload rewrite, no version bump, no history row. The
+# in-memory edit is already in the metadata volatile; this queues the row update.
+function _stage_metadata!(kind::Symbol, id, metadata, db::AbstractDatabase)
+    pm = PendingMetadata(kind, id, metadata)
+    _stage!(b -> push!(b.metadata, pm), db.writeactor, db)
+    return nothing
+end
+
+# The actor's side: take a committed batch and hand it to the write pipeline.
+# Nothing is encoded here, so the intake stays fast and never blocks on a slow
+# form, extern, or stream.
 function _receive!(st::FormActorState, b::WriteBatch)
     _batch_empty(b) && return st
     txid = (st.txseq += 1)
-    for u in values(b.forms)
-        push!(st.pending, PendingWrite(u.vf, u.form, u.metadata, u.history, txid))
-    end
-    for (name, id) in b.names
-        push!(st.names, PendingName(name, id))
-    end
-    for (k, pr) in b.resources
-        st.resources[k] = pr
-    end
-    # The updates now live in `pending` (which holds the strong references that
-    # keep the forms alive until they are written). Clearing the batch releases
-    # the writing task's references, so the weak cache can let a form go once
-    # nothing else needs it. The transaction is already committed by the time this
-    # runs, so the batch is final.
-    _batch_empty!(b)
-    (length(st.pending) + length(st.names)) >= st.config.max_batch && _flush!(st)
+    pipe = st.db === nothing ? nothing : st.db.pipeline
+    pipe === nothing || _enqueue_batch!(pipe, b, txid)
     return st
 end
 
-# Write every queued update and name in one database transaction, retrying per the
-# configured policy. If the policy gives up, the queues are kept, the error is
-# recorded on the database, and the error is rethrown — which poisons the actor,
-# so every later write and read raises.
-function _flush!(st::FormActorState)
-    (isempty(st.pending) && isempty(st.names) && isempty(st.resources)) && return st
-    db = st.db
-    attempt = 0
-    t0 = time()
-    delay = st.config.retry_delay
-    while true
+# A promise row that was referenced but not settled; kept so a quarantined batch
+# can be inspected and retried.
+struct PendingPromiseEnsure
+    id::UUID
+    metadata::Union{Nothing,Form}
+end
+
+# The live object behind a queued key, if it is still cached.
+function _live_object(db, kind::Symbol, id)
+    db === nothing && return nothing
+    if kind === :extern
+        (id isa Tuple && length(id) == 2) || return nothing
+        lock(_EXTERN_HANDLES_LOCK)
         try
-            _write_batch!(st.conn, db, st.pending, st.names, st.resources)
-            break
-        catch e
-            st.last_error = e
-            attempt += 1
-            if !_decide_retry(db, e, attempt, time() - t0)
-                db === nothing ||
-                    (db.failure = DatabaseError(e, Any[pw for pw in st.pending]))
-                rethrow()
-            end
-            _reconnect_writer!(st)
-            sleep(delay)
-            delay = _next_delay(delay, st.config)
+            wr = get(_EXTERN_HANDLES, id, nothing)
+            return wr === nothing ? nothing : wr.value
+        finally
+            unlock(_EXTERN_HANDLES_LOCK)
         end
     end
-    for pw in st.pending
-        pw.vf.persisted = true
+    id isa UUID || return nothing
+    cache = kind === :form ? db.cache :
+            kind === :actor ? db.actorcache :
+            kind === :promise ? db.promisecache :
+            kind === :stream ? db.streamcache : nothing
+    cache === nothing && return nothing
+    lock(db.cachelock)
+    try
+        wr = get(cache, id, nothing)
+        return wr === nothing ? nothing : wr.value
+    finally
+        unlock(db.cachelock)
     end
-    empty!(st.pending)
-    empty!(st.names)
-    empty!(st.resources)
-    return st
 end
 
-function _reconnect_writer!(st::FormActorState)
-    try
-        close(st.conn)
-    catch
-    end
-    try
-        st.conn = LibPQ.Connection(_conninfo(st.config))
-    catch
-    end
-    return nothing
+# Everything a batch needs, encoded and ready to write. Produced by
+# `_prepare_batch!` on an encoder task and consumed by `_write_prepared!` on the
+# writer task, so encoding and database I/O never share a task.
+struct PreparedBatch
+    payloads::Vector{String}
+    form_metas::Vector{Union{Missing,String}}
+    actor_payloads::Vector{String}
+    actor_metas::Vector{Union{Missing,String}}
+    metadata_params::Vector{Union{Missing,String}}
+    settlement_payloads::Dict{UUID,String}
+    stream_rows::Dict{UUID,NTuple{4,Any}}
+    resource_rows::Dict{Tuple{Symbol,Symbol},NTuple{2,Any}}
+    resource_handles::Dict{Tuple{Symbol,Symbol},ExternHandle}
+    ensure_metas::Dict{UUID,Union{Missing,String}}
 end
 
-# Append every queued update to the history and project it into the current
-# snapshot, then record every name, all inside one transaction so the commit is
-# all-or-nothing. Forms are written before names so the name's foreign key is
-# satisfied.
-function _write_batch!(conn, db, pending::Vector{PendingWrite}, names::Vector{PendingName},
-                       queued::Dict{Tuple{Symbol,Symbol},PendingResource})
-    # Encode the forms first: encoding records every extern a form references, so
-    # those resource rows are written before the forms that name them.
+# Encode a batch's forms, metadata, actor values, promise payloads, streams, and
+# extern bytes. All encoding happens inside one `_collecting!` region, so every
+# object referenced from any of them is recorded before the rows are written.
+function _prepare_batch!(db, pending::Vector{PendingWrite},
+                         queued::Dict{Tuple{Symbol,Symbol},PendingResource},
+                         queued_streams::Dict{UUID,PendingStream},
+                         actors::Vector{PendingActor},
+                         promise_ensure::Dict{UUID,Union{Nothing,Form}},
+                         promise_settlements::Dict{UUID,PendingPromise},
+                         metadata_updates::Vector{PendingMetadata})
+    # All encoding happens inside one `_collecting!` region: form payloads,
+    # metadata (of every kind), actor values, promise payloads, stream items, and
+    # the metadata of resources and streams. Encoding records every extern,
+    # promise, and stream referenced from any of them, so their rows are written
+    # before the rows that name them. The notes live only inside this region, so
+    # an unrelated `to_JSON` on a long-lived task leaves no strong references
+    # behind.
     refs = _refset()
     empty!(refs)
-    payloads = [to_JSON(pw.form) for pw in pending]
+    prefs = _promise_refs()
+    empty!(prefs)
+    srefs = _stream_refs()
+    empty!(srefs)
+    payloads = String[]
+    form_metas = Union{Missing,String}[]
+    actor_payloads = String[]
+    actor_metas = Union{Missing,String}[]
+    metadata_params = Union{Missing,String}[]
+    settlement_payloads = Dict{UUID,String}()
     # LibPQ sends `missing` as SQL NULL; `nothing` would be encoded as a string.
-    metas = [pw.metadata === nothing ? missing : to_JSON(pw.metadata) for pw in pending]
-    resources = Dict{Tuple{Symbol,Symbol},PendingResource}(queued)
-    for h in keys(refs)
-        h isa ExternHandle || continue
-        # A constructed handle learns its database the first time a form that
-        # names it is written, so later read-edits know where to sync.
-        (h.db === nothing && db !== nothing) && setfield!(h, :db, db)
-        _rw_read(h.lock) do
-            resources[(h.type, h.id::Symbol)] =
-                PendingResource(h.type, h.id::Symbol, _serialize_resource(h))
-        end
-    end
-    LibPQ.execute(conn, "BEGIN")
+    # Each stream entry is `(items-json, maxsize, closed, metadata-param)`;
+    # each resource entry is `(bytes, metadata-param)`; each ensure entry is its
+    # metadata parameter.
+    stream_rows = Dict{UUID,NTuple{4,Any}}()
+    resource_rows = Dict{Tuple{Symbol,Symbol},NTuple{2,Any}}()
+    resource_handles = Dict{Tuple{Symbol,Symbol},ExternHandle}()
+    ensure_metas = Dict{UUID,Union{Missing,String}}()
+    # Stream snapshots: the queued ones, plus every stream named by any encoded
+    # value or by another stream's queued items. Encoding the items can name more
+    # streams, so this runs to a fixed point.
+    streams = Dict{UUID,PendingStream}(queued_streams)
     try
-        for pr in values(resources)
-            # LibPQ encodes a `Vector{UInt8}` as a PostgreSQL array literal, so
-            # the bytes are sent as bytea's hex input form instead.
-            LibPQ.execute(conn, _UPSERT_RESOURCE_SQL,
-                          (string(pr.type), string(pr.id), "\\x" * bytes2hex(pr.data)))
+        _collecting!() do
+            for pw in pending
+                push!(payloads, to_JSON(pw.form))
+                push!(form_metas, _metadata_param(pw.metadata))
+            end
+            for pa in actors
+                push!(actor_payloads, to_JSON(pa.value))
+                push!(actor_metas, _metadata_param(pa.metadata))
+            end
+            for pm in metadata_updates
+                push!(metadata_params, _metadata_param(pm.metadata))
+            end
+            for (id, pp) in promise_settlements
+                settlement_payloads[id] = to_JSON(pp.payload)
+            end
+            for (id, ps) in streams
+                stream_rows[id] = (_encode_stream_items(ps.items), ps.maxsize,
+                                   ps.closed, _metadata_param(ps.metadata))
+            end
+            while true
+                todo = Any[sf for sf in keys(srefs)
+                           if sf isa StreamForm && !haskey(stream_rows, sf.id)]
+                isempty(todo) && break
+                for sf in todo
+                    sf.loaded || load!(sf)
+                    inner = sf.stream::Air.Stream{Form}
+                    ps = PendingStream(sf, snapshot(inner), maxsize(inner),
+                                       !isopen(inner), _metavalue(sf))
+                    streams[sf.id] = ps
+                    stream_rows[sf.id] = (_encode_stream_items(ps.items), ps.maxsize,
+                                          ps.closed, _metadata_param(ps.metadata))
+                end
+            end
+            # A resource's bytes are captured under its lock. A handle whose row
+            # already exists needs no serialization: the form only names it, and
+            # any later edit writes its own ordered resource batch.
+            for (k, pr) in queued
+                resource_rows[k] = (pr.data, _metadata_param(pr.metadata))
+                pr.handle === nothing || (resource_handles[k] = pr.handle)
+            end
+            for h in keys(refs)
+                h isa ExternHandle || continue
+                # A constructed handle learns its database the first time a form
+                # that names it is written, so later read-edits know where to
+                # sync.
+                (h.db === nothing && db !== nothing) && setfield!(h, :db, db)
+                # A rehydrated handle's bytes are the row it came from; a stored
+                # handle's row already exists. Only a never-stored, loaded handle
+                # has bytes to queue.
+                h.loaded || continue
+                h.present && continue
+                key = (h.type, h.id::Symbol)
+                haskey(resource_rows, key) && continue
+                _rw_read(h.lock) do
+                    resource_rows[key] = (_serialize_resource(h),
+                                          _metadata_param(_metavalue(h)))
+                end
+                resource_handles[key] = h
+            end
+            # Every settlement ensures its own row, so a delivery to a promise
+            # that was never stored is not lost (and carries its owner metadata).
+            for (id, meta) in promise_ensure
+                ensure_metas[id] = _metadata_param(meta)
+            end
+            for pf in keys(prefs)
+                pf isa PromiseForm &&
+                    (ensure_metas[pf.id] = _metadata_param(_metavalue(pf)))
+            end
+            for (id, pp) in promise_settlements
+                ensure_metas[id] = _metadata_param(pp.metadata)
+            end
+            return nothing
         end
-        for i in eachindex(pending)
-            pw = pending[i]
-            params = pw.history ?
-                (string(pw.vf.id), payloads[i], metas[i], pw.history, pw.txid) :
-                (string(pw.vf.id), payloads[i], metas[i], pw.history)
-            LibPQ.execute(conn, pw.history ? _UPSERT_SQL : _UPSERT_CURRENT_SQL, params)
-        end
-        for pn in names
-            LibPQ.execute(conn, _UPSERT_NAME_SQL, (pn.name, string(pn.id)))
-        end
-        LibPQ.execute(conn, "COMMIT")
-    catch
-        try
-            LibPQ.execute(conn, "ROLLBACK")
-        catch
-        end
-        rethrow()
+    finally
+        empty!(refs)
+        empty!(prefs)
+        empty!(srefs)
+    end
+    return PreparedBatch(payloads, form_metas, actor_payloads, actor_metas,
+                         metadata_params, settlement_payloads, stream_rows,
+                         resource_rows, resource_handles, ensure_metas)
+end
+
+_metadata_param(m::Nothing) = missing
+_metadata_param(m::Form) = to_JSON(m)
+
+# Apply a metadata-only edit to the row of the object it belongs to. A row that
+# does not exist is simply untouched (an unpersisted extern, a dead extern). The
+# metadata parameter is precomputed inside the batch's collection region.
+function _apply_metadata!(conn, pm::PendingMetadata, meta)
+    if pm.kind === :form
+        LibPQ.execute(conn, _UPDATE_FORM_METADATA_SQL, (string(pm.id), meta))
+    elseif pm.kind === :actor
+        LibPQ.execute(conn, _UPDATE_ACTOR_METADATA_SQL, (string(pm.id), meta))
+    elseif pm.kind === :promise
+        LibPQ.execute(conn, _UPDATE_PROMISE_METADATA_SQL, (string(pm.id), meta))
+    elseif pm.kind === :stream
+        LibPQ.execute(conn, _UPDATE_STREAM_METADATA_SQL, (string(pm.id), meta))
+    elseif pm.kind === :extern
+        (t, i) = pm.id
+        LibPQ.execute(conn, _UPDATE_RESOURCE_METADATA_SQL,
+                      (string(t), string(i), meta))
+    else
+        error("unknown metadata kind $(pm.kind)")
     end
     return nothing
 end

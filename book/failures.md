@@ -1,22 +1,75 @@
 # Failures and retries
 
 A connection to PostgreSQL can fail at any time — a dropped socket, a restart, a
-network blip. AirDB gives you two policies, chosen with `failure` on the
-`DatabaseConfig`.
+network blip — and a particular row can be impossible to write. AirDB lets you
+choose what a permanent failure does with `failure` on the `DatabaseConfig`:
+`:isolate` (the default), `:abort`, or `:retry`.
 
-## `:abort` (the default)
+Retries are separate from the terminal action. `:isolate` and `:retry` both retry
+a failing operation while a **budget** lasts (reconnecting first); when the
+budget is spent, they **quarantine** the batch. `:abort` gives up immediately (or
+when the `on_error` hook says to stop) and fails the whole database.
 
-As soon as a database operation fails, the database is **failed**: the writer
-actor is poisoned, every later write raises, and every later read raises. Nothing
-is silently lost, but the database is unusable until it is replaced.
+## `:isolate` (the default)
+
+A batch that cannot be saved is **quarantined**: its committed in-memory values
+remain readable, the failure is recorded with the objects and pending writes it
+contained, and unrelated reads and writes continue.
 
 ```julia
-db = create_database(DatabaseConfig(; dbname = "airdb_test", user = "airdb");
+db = create_database(DatabaseConfig(; dbname = "airdb_test", user = "airdb",
+                                    retries = 0);      # no retries for this demo
                      overwrite = true)
 vf = VolatileForm(db, n = 1)
 AirDB.sync(db)
 
-close(db.writeactor[].conn)      # break the writer connection
+close(AirDB._writer_conn(db))    # break the writer connection
+@tx vf[:n] = 2
+AirDB.sync(db)                   # does not throw
+vf[]                             # Form(n=2) — the committed value is kept
+failed(db, vf.id)                # true — its row was not written
+```
+
+Inspect and clear the failures:
+
+```julia
+write_failures(db)               # Vector{FailureRecord}, oldest first
+write_failures(db, vf.id)        # the records touching this object
+r = first(write_failures(db))
+r.error                          # the database error
+r.items[1].kind                  # :form
+r.items[1].object                # the live VolatileForm
+r.items[1].write                 # the pending write (value, metadata, history, txid)
+
+# Acknowledge, and optionally re-stage the current in-memory value:
+clear_write_failure!(db, vf.id; retry = true)
+AirDB.sync(db)
+```
+
+`clear_write_failure!(db, id)` with the default `retry = false` only
+acknowledges the loss and unblocks loading again: a later reload reads the older
+row. With `retry = true` the object's **current** value is re-staged, so a retry
+cannot regress a newer write. `clear_write_failures!(db)` clears every record.
+
+Read errors are recorded separately, since they are not durability gaps:
+`read_failures(db)`, `read_failures(db, id)`, and `clear_read_failures!(db)`.
+Under `:isolate` a failed read raises to its caller but does not poison later
+reads.
+
+## `:abort`
+
+With `failure = :abort`, the first permanent failure fails the **whole
+database**: `db.failure` is set, every later write raises, and every later read
+raises. Nothing is silently lost, but the database is unusable until it is
+replaced.
+
+```julia
+cfg = DatabaseConfig(; dbname = "airdb_test", user = "airdb", failure = :abort)
+db = create_database(cfg; overwrite = true)
+vf = VolatileForm(db, n = 1)
+AirDB.sync(db)
+
+close(AirDB._writer_conn(db))    # break the writer connection
 @tx vf[:n] = 2
 AirDB.sync(db)
 # ERROR: AirDB database error: ... (1 unsaved write(s))
@@ -27,9 +80,11 @@ get_form(db, uuid4())[]          # ERROR: AirDB database error: ...
 
 ## `:retry`
 
-With `failure = :retry`, a failed operation is retried instead, reconnecting
-first, while a **budget** lasts. Reads block until a retry succeeds (or the budget
-is spent); writes accumulate in the writer's queue meanwhile.
+`:retry` is a compatibility alias for the isolated retry path: a failed
+operation is retried, reconnecting first, while a **budget** lasts. Reads block
+until a retry succeeds (or the budget is spent); writes accumulate in the
+pipeline meanwhile. When the budget is spent the batch is quarantined, as under
+`:isolate`.
 
 ```julia
 cfg = DatabaseConfig(;
@@ -45,7 +100,7 @@ db = create_database(cfg; overwrite = true)
 
 vf = VolatileForm(db, n = 1)
 AirDB.sync(db)
-close(db.writeactor[].conn)      # break the writer connection
+close(AirDB._writer_conn(db))    # break the writer connection
 @tx vf[:n] = 2
 AirDB.sync(db)                   # the writer reconnects, retries, and succeeds
 vf[:n]                           # 2
@@ -56,23 +111,22 @@ You give a budget as a **number of retries** (`retries`), an **amount of time**
 (`retry_time`), or both — whichever runs out first wins. If you set neither, a
 small default is used.
 
-If the budget is spent, the database fails exactly as under `:abort`: the error
-is recorded on `db.failure` and every later operation raises. The failed writes
-are kept on the error.
-
 ## The `on_error` hook
 
 Set `on_error` to a function `on_error(db, err)` and it is called on **every**
 database error — writer or reader — before the policy is applied. Its return
-value decides what happens:
+value decides whether to retry:
 
 | return | meaning |
 | --- | --- |
 | `:retry` or `true` | retry, within the configured budget |
-| `:abort` or `false` | do not retry; fail the database |
+| `:abort` or `false` | do not retry |
 | an `Integer` | retry at most that many attempts |
 | a `Real` | retry for at most that many seconds |
 | `nothing` | use the configured `failure` policy |
+
+What happens after retries are exhausted is still the configured `failure`:
+`:isolate`/`:retry` quarantine the batch; `:abort` fails the database.
 
 The hook receives the `Database`, so it can inspect the unsaved work with
 [`pending_writes`](api.md), log the error, alert, or change its mind as an outage
@@ -87,7 +141,7 @@ cfg = DatabaseConfig(;
         attempts[] += 1
         n = length(pending_writes(db))          # the updates a retry would save
         @warn "database error; $n write(s) pending" exception = err
-        n > 1000 ? :abort : :retry              # give up if too far behind
+        n > 1000 ? :abort : :retry              # stop retrying if too far behind
     end,
 )
 ```
@@ -106,5 +160,5 @@ cfg = DatabaseConfig(;
 :class: note
 Each flush and each read has its own attempt count and clock. During a long
 outage, every read independently retries for up to `retry_time` before failing,
-and the writer's queue keeps growing until it recovers or gives up.
+and the pipeline's queue keeps growing until it recovers or gives up.
 ```

@@ -11,6 +11,8 @@ project:
     - file: named-forms.md
     - file: forms.md
     - file: externs.md
+    - file: actor-promise-delay-forms.md
+    - file: stream-forms.md
     - file: transactions.md
     - file: indexing.md
     - file: persistence.md

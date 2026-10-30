@@ -39,6 +39,10 @@ register_extern(:counter, Counter;
   operations are allowed, and the API is available to every thread at any time.
 - `serialize`/`deserialize` are both present or both absent. With them, a *named*
   extern can be stored in the database; without them it is never stored.
+- `equal = (a, b) -> Bool` and `hash = (data, seed) -> UInt` (both, or neither)
+  are optional for an **immutable** type. They give the extern value semantics
+  in `isequiv`/`equivhash`. Without them — and for every mutable extern — two
+  externs are equivalent only when they wrap the same live handle.
 
 Operation and constructor names are keywords, as in `Form(Symbol(":get"))`.
 
@@ -135,7 +139,7 @@ Two forms that name the same `(type, id)` share one handle — and therefore one
 lock and one version.
 
 Every read-edit of a stored extern queues an update of its bytes to the
-database's writer actor, so the stored copy follows the live one.
+database's write pipeline, so the stored copy follows the live one.
 
 A `MemoryDatabase` keeps extern data for the session and never writes it
 anywhere, but otherwise behaves the same.

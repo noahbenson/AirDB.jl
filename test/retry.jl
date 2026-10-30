@@ -11,7 +11,7 @@
             AirDB.sync(db)
             @test _current_version(conn, vf.id) == 1
 
-            close(db.writeactor[].conn)      # break the writer connection
+            close(AirDB._writer_conn(db))      # break the writer connection
             @tx vf[:n] = 2
             AirDB.sync(db)                   # reconnects and retries, then succeeds
             @test _current_version(conn, vf.id) == 2
@@ -22,19 +22,21 @@
         end
     end
 
-    @testset "on_error hook can force abort" begin
+    @testset "on_error hook can force retry under :abort" begin
         seen = Ref(0)
-        rcfg = _reconfig(cfg; failure = :retry, retries = 5,
-                         on_error = (db, err) -> (seen[] += 1; :abort))
+        rcfg = _reconfig(cfg; failure = :abort, retries = 5,
+                         retry_delay = 0.01, retry_delay_max = 0.05,
+                         on_error = (db, err) -> (seen[] += 1; :retry))
         db = create_database(rcfg; overwrite = true)
         try
             vf = VolatileForm(db, n = 1)
             AirDB.sync(db)
-            close(db.writeactor[].conn)
+            close(AirDB._writer_conn(db))
             @tx vf[:n] = 2
-            @test_throws Exception AirDB.sync(db)
+            AirDB.sync(db)
             @test seen[] >= 1
-            @test db.failure isa DatabaseError
+            @test db.failure === nothing
+            @test value(vf[:n]) == 2
         finally
             close(db)
         end
@@ -48,7 +50,7 @@
         try
             vf = VolatileForm(db, n = 1)
             AirDB.sync(db)
-            close(db.writeactor[].conn)
+            close(AirDB._writer_conn(db))
             @tx vf[:n] = 2
             AirDB.sync(db)
             @test seen[] >= 1                # the hook saw the queued update
@@ -57,18 +59,32 @@
         end
     end
 
-    @testset "retry gives up when the budget is spent" begin
+    @testset "retry gives up by quarantining" begin
         rcfg = _reconfig(cfg; failure = :retry, retries = 0, retry_delay = 0.01)
         db = create_database(rcfg; overwrite = true)
+        conn = _connect(rcfg)
         try
             vf = VolatileForm(db, n = 1)
             AirDB.sync(db)
-            close(db.writeactor[].conn)
+            close(AirDB._writer_conn(db))
             @tx vf[:n] = 2
-            @test_throws Exception AirDB.sync(db)
-            @test db.failure isa DatabaseError
-            @test_throws ActorException tx(() -> (vf[:n] = 3))
+            AirDB.sync(db)                   # no throw: the batch is quarantined
+            @test db.failure === nothing
+            @test failed(db, vf.id)
+            @test length(write_failures(db)) == 1
+            @test value(vf[:n]) == 2         # the committed in-memory value is kept
+            @test _current_version(conn, vf.id) == 1
+            # the writer reconnects, so later writes succeed
+            @tx vf[:n] = 3
+            AirDB.sync(db)
+            @test _current_version(conn, vf.id) == 2     # the row's next version
+            # clearing with retry re-stages the current value
+            @test clear_write_failure!(db, vf.id; retry = true)
+            AirDB.sync(db)
+            @test _current_version(conn, vf.id) == 3
+            @test isempty(write_failures(db))
         finally
+            close(conn)
             close(db)
         end
     end

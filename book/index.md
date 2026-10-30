@@ -26,12 +26,12 @@ AirDB builds three objects on top of those:
   type that gets stored;
 - **`VolatileForm`** — a `Form` with a stable UUID that writes itself to the
   database when the transaction that changed it commits; and
-- **`Database`** — the connection, the single writer actor, the read pool, and a
+- **`Database`** — the connection, the write pipeline, the read pool, and a
   cache of live forms.
 
 ```{admonition} One writer, many readers
 :class: tip
-Every `Database` owns **one** writer actor. Committed updates are sent to it in
+Every `Database` owns **one** ordered writer. Committed updates are sent to it in
 Air's global commit order and written by it in that order, so the database never
 sees two writers race. Reads go through a separate pool of connections and never
 wait on the writer.

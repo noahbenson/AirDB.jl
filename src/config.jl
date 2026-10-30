@@ -11,7 +11,7 @@
 """
     DatabaseConfig(; dbname, user, host="localhost", port=5432, password=nothing,
                      sslmode="prefer", connect_timeout=10, readpoolsize=8,
-                     max_batch=1, failure=:abort, retries=nothing, retry_time=nothing,
+                     max_batch=1, failure=:isolate, retries=nothing, retry_time=nothing,
                      retry_delay=0.1, retry_delay_max=5.0, on_error=nothing,
                      conninfo=nothing)
     DatabaseConfig(url::AbstractString; kwargs...)
@@ -26,15 +26,16 @@ set, is a libpq connection string or URI used verbatim (as built by the
 * `readpoolsize` — how many read connections to keep in the pool.
 * `max_batch` — how many committed updates the writer actor accumulates before
   flushing. `1` (the default) writes every commit as soon as it arrives.
-* `failure` — what to do when a database operation fails:
-  * `:abort` (the default) — the writer actor is poisoned and every database
-    operation raises.
-  * `:retry` — the failing operation is retried, reconnecting first, while the
-    retry budget lasts. Reads block until a retry succeeds or the budget is
-    exhausted; writes accumulate in the writer's queue meanwhile.
+* `failure` — what to do when an operation fails permanently:
+  * `:isolate` (the default) — quarantine the failing batch, record it (see
+    [`write_failures`](@ref)), and keep serving unrelated reads and writes.
+  * `:abort` — the writer actor is poisoned and every database operation raises.
+  * `:retry` — a compatibility alias for the isolated retry path.
+  `:isolate` and `:retry` retry within the budget before quarantining; `:abort`
+  gives up immediately.
 * `retries` / `retry_time` — the retry budget: at most this many attempts, or at
   most this many seconds. If both are given, whichever runs out first wins; if
-  neither is given under `:retry`, a small default is used.
+  neither is given under `:isolate`/`:retry`, a small default is used.
 * `retry_delay` / `retry_delay_max` — the delay before the first retry and its
   ceiling; the delay doubles after each failed attempt up to the ceiling.
 * `on_error` — a hook `on_error(db, err)` called on every database error, before
@@ -42,6 +43,11 @@ set, is a libpq connection string or URI used verbatim (as built by the
   policy, an `Integer` to retry at most that many more times, a `Real` to retry
   for that many seconds, or `nothing` to use the configured policy. It can read
   [`pending_writes`](@ref) on `db` to see the unsaved updates.
+* `encoder_tasks` — how many tasks encode committed batches (the form JSON,
+  extern serialization, stream snapshots). Encoding happens after commit and in
+  parallel with database writes; the default is `max(1, min(4, nthreads()-1))`.
+* `max_pending` — the most committed-but-unwritten batches allowed before a
+  committing thread waits. This bounds the writer's lag; the default is `256`.
 
 """
 Base.@kwdef struct DatabaseConfig
@@ -54,13 +60,15 @@ Base.@kwdef struct DatabaseConfig
     connect_timeout::Int = 10
     readpoolsize::Int = 8
     max_batch::Int = 1
-    failure::Symbol = :abort
+    failure::Symbol = :isolate
     retries::Union{Nothing,Int} = nothing
     retry_time::Union{Nothing,Float64} = nothing
     retry_delay::Float64 = 0.1
     retry_delay_max::Float64 = 5.0
     on_error::Union{Nothing,Function} = nothing
     conninfo::Union{Nothing,String} = nothing
+    encoder_tasks::Int = max(1, min(4, Threads.nthreads() - 1))
+    max_pending::Int = 256
 end
 
 # A URL or libpq connection string is stored verbatim; the structured fields are
@@ -112,8 +120,8 @@ This is part of AirDB's internal implementation.
 _conninfo(cfg::DatabaseConfig) = cfg.conninfo === nothing ? _build_conninfo(cfg) : cfg.conninfo
 
 function _validate(cfg::DatabaseConfig)
-    (cfg.failure === :abort || cfg.failure === :retry) ||
-        throw(ArgumentError("failure must be :abort or :retry, not :$(cfg.failure)"))
+    (cfg.failure === :isolate || cfg.failure === :abort || cfg.failure === :retry) ||
+        throw(ArgumentError("failure must be :isolate, :abort or :retry, not :$(cfg.failure)"))
     (cfg.readpoolsize >= 1) ||
         throw(ArgumentError("readpoolsize must be at least 1"))
     (cfg.max_batch >= 1) ||
@@ -125,6 +133,10 @@ function _validate(cfg::DatabaseConfig)
     (cfg.retry_delay >= 0) || throw(ArgumentError("retry_delay must be non-negative"))
     (cfg.retry_delay_max >= cfg.retry_delay) ||
         throw(ArgumentError("retry_delay_max must be at least retry_delay"))
+    (cfg.encoder_tasks >= 1) ||
+        throw(ArgumentError("encoder_tasks must be at least 1"))
+    (cfg.max_pending >= 1) ||
+        throw(ArgumentError("max_pending must be at least 1"))
     return cfg
 end
 

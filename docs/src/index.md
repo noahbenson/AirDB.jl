@@ -29,11 +29,17 @@ The pieces:
 - **`VolatileForm`** — a `Form` with a stable UUID that persists itself when the
   transaction that changed it commits, loaded lazily and cached by id. It carries
   optional `metadata` (mutable) and a fixed `history` choice.
-- **`AbstractAirExtern`** — a host-level value a form can hold (a promise, a
-  socket, a config handle), with an interface of read-only and read-edit
-  operations registered by `register_extern`. Mutable externs are accessed through
+- **`AbstractAirExtern`** — a host-level value a form can hold (a socket, a
+  config handle), with an interface of read-only and read-edit operations
+  registered by `register_extern`. Mutable externs are accessed through
   `reserve`/`reserve_read`; a named, serializable extern's bytes are stored in
   the `resources` table.
+- **`ActorForm`, `PromiseForm`, `StreamForm`, `DelayForm`** — forms backed by a
+  live Air actor, a single-assignment promise, a FIFO stream, and a run-once
+  lazy value. Each persists and loads lazily by id (delays inline by type and
+  form). A promise is pending, delivered, or failed durably; a stream is a
+  persisted, optionally bounded queue; and every database-backed kind carries
+  owner/ACL metadata readable without loading its payload.
 - **`Database`** — the connection, the single writer actor, the read pool, and
   the cache. `create_database` makes a new one; `open_database` opens an existing
   one; `MemoryDatabase` is a fake, in-memory one for tests.

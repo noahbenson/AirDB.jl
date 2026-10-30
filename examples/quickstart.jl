@@ -178,25 +178,43 @@ AirDB.sync(bdb)
 value(bf[:n])                     # 3
 close(bdb)
 
-# %% 17. Failure handling (:abort) --------------------------------------------
-# Under the default :abort policy a database error fails the whole database:
-# reads and writes raise until it is replaced. This cell deliberately breaks a
-# throwaway database.
+# %% 17. Failure isolation (:isolate) -----------------------------------------
+# The default :isolate policy quarantines a batch that cannot be saved: the
+# failure is recorded, the committed in-memory value is kept, and unrelated
+# reads and writes continue. This cell deliberately breaks a throwaway database.
 fdb = create_database(DatabaseConfig(; host = cfg.host, port = cfg.port,
                                        dbname = cfg.dbname, user = cfg.user,
-                                       password = cfg.password);
+                                       password = cfg.password, retries = 0);
                       overwrite = true)
 fv = VolatileForm(fdb, n = 1)
 AirDB.sync(fdb)
-close(fdb.writeactor[].conn)      # break the writer connection
+close(AirDB._writer_conn(fdb))    # break the writer connection
+@tx fv[:n] = 2
+AirDB.sync(fdb)                   # does not throw
+fv[]                              # Form(n=2) — the committed value is kept
+failed(fdb, fv.id)                # true — the write is quarantined
+first(write_failures(fdb))        # the record: the error and the pending write
+clear_write_failure!(fdb, fv.id; retry = true)   # acknowledge and retry
+AirDB.sync(fdb)
+close(fdb)
+
+# With `failure = :abort`, a database error fails the whole database instead:
+# reads and writes raise until it is replaced.
+adb = create_database(DatabaseConfig(; host = cfg.host, port = cfg.port,
+                                       dbname = cfg.dbname, user = cfg.user,
+                                       password = cfg.password,
+                                       failure = :abort); overwrite = true)
+av = VolatileForm(adb, n = 1)
+AirDB.sync(adb)
+close(AirDB._writer_conn(adb))
 try
-    @tx fv[:n] = 2
-    AirDB.sync(fdb)
+    @tx av[:n] = 2
+    AirDB.sync(adb)
 catch e
     e                             # the write fails
 end
-fdb.failure isa DatabaseError     # true — the database is now failed
-close(fdb)
+adb.failure isa DatabaseError     # true — the database is now failed
+close(adb)
 
 # %% 18. Retry policy (:retry) and the on_error hook --------------------------
 # With `failure = :retry`, a database error is retried — reconnecting first —
@@ -212,7 +230,7 @@ rdb = create_database(DatabaseConfig(; host = cfg.host, port = cfg.port,
                       overwrite = true)
 rv = VolatileForm(rdb, n = 1)
 AirDB.sync(rdb)
-close(rdb.writeactor[].conn)      # break the writer connection
+close(AirDB._writer_conn(rdb))    # break the writer connection
 @tx rv[:n] = 2                    # the writer reconnects and retries ...
 AirDB.sync(rdb)
 value(rv[:n])                     # 2 — the write succeeded

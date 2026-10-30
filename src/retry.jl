@@ -16,17 +16,27 @@
 """
     pending_writes(db::Database)
 
-The updates the writer has not yet saved. This is meant for use inside an
-`on_error` hook, where the writer is between attempts and its queue is the work
-that a successful retry would save. If the writer has already failed, the writes
-from the failed batch are returned instead.
+The updates the writer has not yet saved — form writes, actor values, queued
+stream snapshots, resource bytes, promise rows and settlements, names, and
+metadata-only edits — plus any writes that were quarantined by the failure
+policy. This is meant for use inside an `on_error` hook, where the writer is
+between attempts and its queue is the work that a successful retry would save.
+If the writer has already been poisoned (`:abort`), the writes from the failed
+batch are returned instead.
 """
 function pending_writes(db::AbstractDatabase)
+    db isa Database || return Any[]
     e = geterror(db.writeactor)
     if e !== nothing
         return db.failure === nothing ? Any[] : db.failure.failed_writes
     end
-    return db.writeactor[].pending
+    pipe = db.pipeline
+    pipe === nothing && return _failed_write_items(db)
+    items = lock(pipe.lock) do
+        _pending_items(pipe)
+    end
+    append!(items, _failed_write_items(db))
+    return items
 end
 
 # Decide whether a failed operation should be retried. `attempt` is the number of
@@ -54,11 +64,12 @@ function _decide_retry(db, err, attempt::Int, elapsed::Float64)
     elseif d isa Real
         maxt = Float64(d)
     else
-        # no hook decision: obey the configured policy
-        cfg.failure === :retry || return false
+        # no hook decision: obey the configured policy. `:isolate` and `:retry`
+        # retry within the budget; only `:abort` gives up immediately.
+        (cfg.failure === :retry || cfg.failure === :isolate) || return false
     end
     if maxn === nothing && maxt === nothing
-        maxn = 5                      # :retry with no budget: a small default
+        maxn = 5                      # no budget configured: a small default
     end
     (maxn !== nothing && attempt >= maxn) && return false
     (maxt !== nothing && elapsed >= maxt) && return false

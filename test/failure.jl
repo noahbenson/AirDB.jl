@@ -1,7 +1,7 @@
-# Wait until an actor enters its error state (or give up).
-function _wait_error(actor; timeout = 10.0)
+# Wait until the database records a poisoning failure (or give up).
+function _wait_failure(db; timeout = 10.0)
     t0 = time()
-    while geterror(actor) === nothing
+    while db.failure === nothing
         time() - t0 > timeout && return false
         sleep(0.002)
     end
@@ -9,7 +9,7 @@ function _wait_error(actor; timeout = 10.0)
 end
 
 @testset "failure policy (:abort)" begin
-    cfg = _TEST_CFG
+    cfg = _reconfig(_TEST_CFG; failure = :abort)
     db = create_database(cfg; overwrite = true)
     conn = _connect(cfg)
     try
@@ -19,20 +19,19 @@ end
         @test v0 == 1
 
         # break the writer connection, then commit an update: the write fails
-        st = db.writeactor[]
-        close(st.conn)
+        close(AirDB._writer_conn(db))
         tx(() -> (vf[:n] = 2))
-        @test _wait_error(db.writeactor)
+        @test _wait_failure(db)
 
-        # the failure is recorded, the actor is poisoned, and nothing landed
+        # the failure is recorded, the database is poisoned, and nothing landed
         @test db.failure isa DatabaseError
-        @test geterror(db.writeactor) isa ActorException
         @test _current_version(conn, vf.id) == v0
 
         # reads of a not-yet-loaded form raise
         @test_throws DatabaseError get_form(db, uuid4())[]
-        # writes raise too, because the actor is poisoned
-        @test_throws ActorException tx(() -> (vf[:n] = 3))
+        # writes raise too: `_stage!` checks the recorded failure (and the actor
+        # is poisoned as well)
+        @test_throws DatabaseError tx(() -> (vf[:n] = 3))
         # and so does an explicit sync
         @test_throws Exception AirDB.sync(db)
     finally
@@ -42,7 +41,7 @@ end
 end
 
 @testset "read failure poisons the database" begin
-    cfg = _TEST_CFG
+    cfg = _reconfig(_TEST_CFG; failure = :abort)
     db = create_database(cfg; overwrite = true)
     try
         id = _create_and_forget(db, n = 1)

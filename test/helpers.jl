@@ -76,7 +76,8 @@ function _reconfig(cfg::DatabaseConfig; kwargs...)
               max_batch = cfg.max_batch, failure = cfg.failure, retries = cfg.retries,
               retry_time = cfg.retry_time, retry_delay = cfg.retry_delay,
               retry_delay_max = cfg.retry_delay_max, on_error = cfg.on_error,
-              conninfo = cfg.conninfo)
+              conninfo = cfg.conninfo, encoder_tasks = cfg.encoder_tasks,
+              max_pending = cfg.max_pending)
     return DatabaseConfig(; merge(base, (; kwargs...))...)
 end
 

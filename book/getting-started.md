@@ -53,7 +53,9 @@ cfg = DatabaseConfig(;
     user         = "airdb",
     readpoolsize = 16,      # connections kept for reads
     max_batch    = 1,       # commits accumulated before one database write
-    failure      = :abort,  # or :retry
+    failure      = :isolate, # or :abort or :retry
+    encoder_tasks = 4,      # tasks that encode committed batches
+    max_pending  = 256,     # committed-but-unwritten batches allowed
 )
 ```
 

@@ -107,6 +107,25 @@ function name_form!(db::AbstractDatabase, name, vf::VolatileForm)
 end
 
 """
+    delete_name!(db::Database, name)
+
+Removes the alias `name` (a `Symbol` or a `String`). The form itself is untouched;
+once nothing else refers to it, [`gc!`](@ref) may collect it. Transactional, like
+[`name_form!`](@ref).
+"""
+function delete_name!(db::AbstractDatabase, name)
+    _check_open(db)
+    key = _namekey(name)
+    return tx() do
+        table = _name_table(db)
+        haskey(table, key) || throw(ArgumentError("no form is named \"$key\""))
+        db.names[] = delete(table, key)
+        _unregister_name!(db, key)
+        return nothing
+    end
+end
+
+"""
     named_forms(db::Database) -> PDict{String,VolatileForm}
 
 The whole name table as it currently stands. The `PDict` is immutable, so it is
@@ -118,4 +137,4 @@ function named_forms(db::AbstractDatabase)
     return _name_table(db)
 end
 
-export named_form, name_form!, named_forms
+export named_form, name_form!, named_forms, delete_name!

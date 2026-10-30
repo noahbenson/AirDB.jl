@@ -19,20 +19,156 @@ _formerror(x, why) =
 # A form (a scalar, a container, or a volatile) is already a member of the closed
 # set and passes through unchanged.
 @inline _formvalue(x::Form) = x
+# An exact leaf type is preserved as it is; the methods below only canonicalize
+# the wider Julia numeric types into a leaf type.
 @inline _formvalue(x::FormLeaf) = x
 # `Bool` before `Integer`, since `Bool <: Integer` and `true` must stay `true`.
 @inline _formvalue(x::Bool) = x
-function _formvalue(x::Integer)
-    return try
-        Int64(x)
-    catch
-        _formerror(x, "it does not fit in an Int64, which is the only integer a Form holds")
-    end
+# The numeric tower's exact leaves (also members of `FormLeaf`; named here so
+# they are more specific than `Integer`/`Real`/`Complex` and cannot be ambiguous).
+@inline _formvalue(x::BigInt) = x
+@inline _formvalue(x::BigFloat) = x
+@inline _formvalue(x::Rational{Int64}) = x
+@inline _formvalue(x::Rational{BigInt}) = x
+@inline _formvalue(x::Complex{BigFloat}) = x
+@inline _formvalue(x::ComplexF64) = x
+
+# An integer becomes an `Int64` when it fits, and a `BigInt` otherwise.
+@inline _formvalue(x::Integer) = _canonical_int(x)
+function _canonical_int(x::Integer)
+    x isa BigInt && return x
+    typemin(Int64) <= x <= typemax(Int64) ? Int64(x) : BigInt(x)
 end
+
+# A float becomes a `Float64` where that is exact (every `Float16`/`Float32`),
+# and otherwise a `BigFloat` at the current precision where that is exact.
+@inline _formvalue(x::Float16) = Float64(x)
+@inline _formvalue(x::Float32) = Float64(x)
+@inline _formvalue(x::Float64) = x
+function _formvalue(x::AbstractFloat)
+    y = BigFloat(x)
+    y == x || _formerror(x, "it is not exactly representable as a BigFloat")
+    return y
+end
+
+# A rational's components pick the leaf type: `Int64`-backed when they fit,
+# `BigInt`-backed otherwise. (`Rational{Int64}`/`Rational{BigInt}` are exact
+# leaves and keep their type; this handles every other integer component type.)
+function _formvalue(x::Rational)
+    n = _canonical_int(numerator(x))
+    d = _canonical_int(denominator(x))
+    return (n isa BigInt || d isa BigInt) ? BigInt(n) // BigInt(d) : Int64(n) // Int64(d)
+end
+
+# A complex becomes `ComplexF64` when both parts are exactly `Float64`, else
+# `Complex{BigFloat}` when both are exactly `BigFloat`, and is otherwise
+# rejected: rounding a part would silently change the value.
+function _formvalue(x::Complex)
+    re, im = real(x), imag(x)
+    r64 = _exact_float64(re)
+    i64 = _exact_float64(im)
+    (r64 !== nothing && i64 !== nothing) && return ComplexF64(r64, i64)
+    rb = _exact_bigfloat(re)
+    ib = _exact_bigfloat(im)
+    (rb !== nothing && ib !== nothing) && return Complex{BigFloat}(rb, ib)
+    return _formerror(x, "its parts are not exactly representable as Float64 or BigFloat")
+end
+
+# The exact `Float64` value of `x`, or `nothing` when there is none.
+function _exact_float64(x)
+    y = try
+        Float64(x)
+    catch
+        return nothing
+    end
+    return y == x ? y : nothing
+end
+
+# The exact `BigFloat` value of `x` at the current precision, or `nothing`.
+function _exact_bigfloat(x)
+    x isa BigFloat && return x
+    y = try
+        BigFloat(x)
+    catch
+        return nothing
+    end
+    return y == x ? y : nothing
+end
+
+# Every other real — an `Irrational` constant, for example — is not a value type
+# a form can hold exactly; it is converted to `Float64`.
 @inline _formvalue(x::Real) = Float64(x)
-@inline _formvalue(x::Complex) = ComplexF64(x)
 @inline _formvalue(x::Char) = string(x)
 @inline _formvalue(x::AbstractString) = String(x)
+
+"""
+    is_form_representable(x) -> Bool
+
+Whether [`to_form(x)`](@ref to_form) can represent `x` without raising. It
+mirrors the conversion rules exactly:
+
+- any [`Form`](@ref), `FormLeaf`, `Bool`, `Symbol`, `String`, `Char`, `Integer`,
+  `Rational`, `Float16`/`Float32`/`Float64`/`BigFloat`, or `Irrational`;
+- a `Complex` whose parts are exactly `Float64` or exactly `BigFloat` (so
+  `complex(1//2, 3//2)` is representable, but `complex(1//3, 0)` is not);
+- an [`AbstractAirExtern`](@ref) whose type is registered;
+- recursively, an `AbstractVector` of representable values, or an
+  `AbstractDict` whose keys are symbols/strings/chars and whose values are
+  representable.
+
+It is a pre-check only: `to_form` itself is unchanged and still raises an
+`ArgumentError` for a value it cannot represent.
+"""
+is_form_representable(::Form) = true
+is_form_representable(::FormLeaf) = true
+is_form_representable(::Bool) = true
+is_form_representable(::BigInt) = true
+is_form_representable(::BigFloat) = true
+is_form_representable(::Rational{Int64}) = true
+is_form_representable(::Rational{BigInt}) = true
+is_form_representable(::Complex{BigFloat}) = true
+is_form_representable(::ComplexF64) = true
+is_form_representable(::Integer) = true
+is_form_representable(::Float16) = true
+is_form_representable(::Float32) = true
+is_form_representable(::Float64) = true
+function is_form_representable(x::AbstractFloat)
+    y = try
+        BigFloat(x)
+    catch
+        return false
+    end
+    return y == x
+end
+is_form_representable(::Rational) = true
+function is_form_representable(x::Complex)
+    re, im = real(x), imag(x)
+    r64 = _exact_float64(re)
+    i64 = _exact_float64(im)
+    (r64 !== nothing && i64 !== nothing) && return true
+    rb = _exact_bigfloat(re)
+    ib = _exact_bigfloat(im)
+    return rb !== nothing && ib !== nothing
+end
+function is_form_representable(x::Real)
+    try
+        Float64(x)
+    catch
+        return false
+    end
+    return true
+end
+is_form_representable(::Char) = true
+is_form_representable(::AbstractString) = true
+is_form_representable(x::AbstractVector) = all(is_form_representable, x)
+function is_form_representable(x::AbstractDict)
+    for (k, v) in x
+        (k isa Symbol || k isa AbstractString || k isa Char) || return false
+        is_form_representable(v) || return false
+    end
+    return true
+end
+is_form_representable(x) = false
 function _formvalue(x::AbstractVector)
     return FormContainer(FormSeq(FormValue[_store(v) for v in x]), FormMap())
 end
@@ -263,4 +399,4 @@ Base.show(io::IO, fs::FormScalar) = (print(io, "Form("); _showvalue(io, fs); pri
 Base.show(io::IO, fc::FormContainer) = (print(io, "Form("); _showcontents(io, fc); print(io, ")"))
 
 export Form, FormScalar, FormContainer, FormLeaf, FormValue, form, to_form, value,
-    iskeyword, iswildcard
+    iskeyword, iswildcard, is_form_representable

@@ -4,8 +4,12 @@ A `Form` is an immutable, nested, JSON-able value. Every node in a form tree is 
 form: a **`FormScalar`** holds a single leaf, a **`FormContainer`** holds a
 sequence of positional values and a map of symbol-keyed ones, a
 **`VolatileForm`** (see [Transactions](transactions.md)) holds a form that
-persists itself, and a **`FormExtern`** (see [Extern types](externs.md)) holds a
-host-level value that is not JSON itself.
+persists itself, a **`FormExtern`** (see [Extern types](externs.md)) holds a
+host-level value that is not JSON itself, **`ActorForm`**, **`PromiseForm`**,
+and **`DelayForm`** (see
+[Actor, promise, and delay forms](actor-promise-delay-forms.md)) hold live Air
+objects, and a **`StreamForm`** (see [Stream forms](stream-forms.md)) holds a
+persisted FIFO of forms.
 
 ## Scalar forms
 
@@ -20,15 +24,33 @@ Form(nothing)           # Form(nothing)
 value(Form("abc"))      # "abc" — unwrap a scalar form to its leaf
 ```
 
-The leaves a form can hold are `String`, `Symbol`, `Bool`, `Int64`, `Float64`,
-`ComplexF64` and `Nothing`. A narrower scalar is converted where the conversion
-cannot lose information:
+The leaves a form can hold are `String`, `Symbol`, `Bool`, `Nothing`, and the
+numeric tower's value types: `Int64`, `BigInt`, `Float64`, `BigFloat`,
+`Rational{Int64}`, `Rational{BigInt}`, `ComplexF64` and `Complex{BigFloat}`. A
+wider or narrower scalar is converted where the conversion cannot lose
+information:
 
 ```julia
-Form(Int32(7))          # Form(7)
+Form(Int32(7))          # Form(7) — an Int64
+Form(Int128(2)^70)      # a BigInt: it does not fit in an Int64
 Form('x')               # Form("x")
 Form(1 + 2im)           # Form(1.0 + 2.0im)
 Form(true)              # Form(true) — Bool stays Bool
+Form(1 // 3)            # Form(1//3) — a Rational{Int64}
+Form(big"1.5")          # a BigFloat, at its own precision
+```
+
+Each of these leaf types survives a JSON round trip as the same Julia type and
+value; a `BigFloat` keeps its precision. A value that fits no exact leaf —
+`Complex(1//3, 0)`, say — raises rather than rounding. The one lossy conversion
+is an `Irrational` constant (`π`, `ℯ`), which becomes a `Float64`.
+`is_form_representable(x)` answers whether `to_form(x)` will succeed, without
+raising, so a caller can check first:
+
+```julia
+is_form_representable(1 // 3)             # true
+is_form_representable(complex(1 // 3, 0)) # false
+is_form_representable([1, 2])             # true, recursively
 ```
 
 ## Containers
@@ -173,15 +195,61 @@ sprint(show, form("a", b = 1))         # "Form(\"a\", b=1)"
 sprint(show, Form(5))                  # "Form(5)"
 ```
 
+### Equivalence
+
+`==` compares values, so `Form(5) == Form(5.0)` and `Form(big(5)) == Form(5)`.
+`isequal` and `hash` use Julia's element relations, so a container holding `NaN`
+is `isequal` to itself and a container holding `-0.0` is not `isequal` to one
+holding `0.0` — which keeps a form usable as a `Dict` key.
+
+That value-based `==` is not the relation you want for a dictionary key in every
+case: a `BigInt` and an `Int64` are different values even when they are
+numerically equal. `isequiv` is the stricter, hashable relation:
+
+- an immutable leaf is equivalent only to a leaf of the **same type** with an
+  equal value, except that `NaN` is equivalent to itself (so `-0.0` and `0.0`
+  are equivalent, as `==` says);
+- an immutable container is equivalent when its sequence matches position by
+  position and its map has the same keys with equivalent values;
+- a mutable form — a `VolatileForm`, `ActorForm`, `PromiseForm`, `StreamForm`,
+  or mutable extern — is equivalent only to the same object;
+- an immutable extern is equivalent only to itself unless its type registered
+  `equal`/`hash` functions;
+- a `DelayForm` is equivalent when its type and serialization form are
+  equivalent (forcing it changes nothing).
+
+`equivhash` is a hash consistent with `isequiv`; use the pair together.
+
+```julia
+isequiv(Form(5), Form(5))          # true
+isequiv(Form(5), Form(5.0))        # false — different leaf types
+isequiv(Form(NaN), Form(NaN))      # true
+isequiv(Form(-0.0), Form(0.0))     # true
+isequiv(form(a = 1, b = 2), form(b = 2, a = 1))   # true
+
+d = Dict{UInt,Any}()
+d[equivhash(Form(5))] = Form(5)
+```
+
 ## JSON
 
 A container is written as the two-element list `[seq, map]`, and a scalar form as
 its bare leaf, which makes the format self-describing. Strings and symbols are
 both JSON strings, told apart by the first character inside the quotes (`'` for a
 string, `:` for a symbol); a float always carries a point or exponent; and a
-complex number is written as `{"re": …, "im": …}`. JSON has no infinity or NaN,
-so a non-finite float is written as the marked string `"#inf"`, `"#-inf"`, or
-`"#nan"`:
+complex number is written as `{"re": …, "im": …}`. Values outside JSON's number
+model are marked strings: a non-finite float is `"#inf"`, `"#-inf"`, or
+`"#nan"`, and the arbitrary-precision leaves have their own markers:
+
+| leaf | JSON |
+| --- | --- |
+| `BigInt` | `"#big:<digits>"` |
+| `Rational{Int64}` | `"#rat:<num>/<den>"` |
+| `Rational{BigInt}` | `"#bigrat:<num>/<den>"` |
+| `BigFloat` | `"#bigfloat:<precision-bits>:<digits>"` |
+
+A `Complex{BigFloat}` is the usual `{"re", …}` object with each part written as
+a `BigFloat`.
 
 ```julia
 using AirDB: to_JSON, from_JSON
@@ -192,10 +260,15 @@ to_JSON(Form(5))                  # "5"
 to_JSON(Form("abc"))              # "\"'abc\""
 to_JSON(Form(Inf))                # "\"#inf\""
 to_JSON(Form(ComplexF64(NaN, 0))) # "{\"re\": \"#nan\", \"im\": 0.0}"
+to_JSON(Form(big(5)))             # "\"#big:5\""
+to_JSON(Form(1 // 3))             # "\"#rat:1/3\""
+to_JSON(Form(big"1.5"))           # "\"#bigfloat:256:1.5\""
 
 from_JSON("[[\"'widget\", 1, 2.5], {}]") == form("widget", 1, 2.5)   # true
 from_JSON("5") == Form(5)         # true — a bare scalar is a scalar form
 from_JSON("{\":a\": 1}")          # Form(a=1) — a bare object is a map-only form
+from_JSON("\"#big:5\"")           # Form(big(5)) — a BigInt
+from_JSON("12345678901234567890") # a BigInt too, from a bare large integer
 ```
 
 A form may link to a `VolatileForm`, written `"@<uuid>"`. Reading such a link
@@ -204,7 +277,9 @@ it is an error.
 
 A form may also hold a `FormExtern`, written as `{"extern": "<type>", "id":
 "<id>"}` — or `{"extern": "<type>"}` when it is dead. See
-[Extern types](externs.md).
+[Extern types](externs.md). An actor, promise, or stream link is written
+`"!<uuid>"`, `"~<uuid>"`, or `"&<uuid>"`; a delay is the object
+`{"delay": ":<type>", "form": …}`.
 
 ```julia
 from_JSON("[[\"@11111111-1111-1111-1111-111111111111\"], {}]")

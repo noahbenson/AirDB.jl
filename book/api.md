@@ -8,9 +8,10 @@ can reach with `?name` at the REPL.
 ```julia
 DatabaseConfig(; dbname, user, host = "localhost", port = 5432, password = nothing,
                  sslmode = "prefer", connect_timeout = 10, readpoolsize = 8,
-                 max_batch = 1, failure = :abort, retries = nothing, retry_time = nothing,
+                 max_batch = 1, failure = :isolate, retries = nothing, retry_time = nothing,
                  retry_delay = 0.1, retry_delay_max = 5.0, on_error = nothing,
-                 conninfo = nothing)
+                 conninfo = nothing, encoder_tasks = max(1, min(4, nthreads()-1)),
+                 max_pending = 256)
 DatabaseConfig(url::AbstractString; kwargs...)
 
 create_database(config; overwrite = false) -> Database
@@ -20,17 +21,37 @@ Base.close(db::Database)
 
 AirDB.sync(db::Database)                   # wait until queued writes are saved
 AirDB.status(db::Database)                 # (npending, last_error)
-pending_writes(db::Database)               # the writer's unsaved updates
+pending_writes(db::Database)               # unsaved and quarantined updates
 ```
 
 | `DatabaseConfig` field | meaning |
 | --- | --- |
 | `readpoolsize` | read connections to keep |
 | `max_batch` | commits accumulated before one database write |
-| `failure` | `:abort` or `:retry` |
+| `failure` | `:isolate` (default), `:abort`, or `:retry` |
 | `retries`, `retry_time` | retry budget: attempts and/or seconds |
 | `retry_delay`, `retry_delay_max` | backoff between retries |
 | `on_error` | `on_error(db, err)` hook called on every database error |
+| `encoder_tasks` | tasks that encode committed batches |
+| `max_pending` | committed-but-unwritten batches allowed before a commit waits |
+
+## Failure inspection
+
+```julia
+write_failures(db)                     # Vector{FailureRecord}, oldest first
+write_failures(db, id)                 # records touching a form/actor/promise/
+                                       # stream id, extern (type, id), or name
+failed(db, id)                         # is the object's write quarantined?
+clear_write_failure!(db, id; retry = false)  # acknowledge; retry=true re-stages
+clear_write_failures!(db)
+
+read_failures(db); read_failures(db, id); clear_read_failures!(db)
+
+FailureRecord                          # sequence, error, time, items
+FailedItem                             # kind, id, object, write
+ReadFailure                            # error, time, operation, id
+FailedObjectError                      # raised when loading a quarantined object
+```
 
 ## Forms
 
@@ -40,7 +61,11 @@ Form(seq, map)              # a container from prepared collections
 form(seq...; keys...)       # the general builder
 form()                      # an empty container
 to_form(x)                  # convert any value to a form
+is_form_representable(x)    # would to_form(x) succeed? (a pre-check)
 value(fs)                   # the leaf a scalar form wraps
+
+# FormLeaf: String, Symbol, Bool, Nothing, Int64, BigInt, Float64, BigFloat,
+#           Rational{Int64}, Rational{BigInt}, ComplexF64, Complex{BigFloat}
 
 length(f); isempty(f)       # collection protocol, in the canonical order
 keys(f); values(f); pairs(f)
@@ -56,7 +81,15 @@ filter(pred, f); map_values(fn, f); map_keys(fn, f); deep_map(fn, f)
 to_vector(f); to_dict(f)    # convert out to ordinary Julia data
 
 iskeyword(f); iswildcard(f) # a symbol leaf with a leading : or ?
+
+isequiv(a, b)               # equivalence: same leaf type + value, structural
+                            # containers, object identity for mutable forms
+equivhash(f, h = zero(UInt))# a hash consistent with isequiv
 ```
+
+`==` compares values (so `Form(5) == Form(5.0)`); `isequiv` additionally
+requires the same leaf type, treats `NaN` as equivalent to itself, and gives
+mutable forms identity semantics. See [Forms](forms.md).
 
 Reading and updating use ordinary indexing; see
 [Indexing and updating](indexing.md).
@@ -88,19 +121,73 @@ vf[idxs...]                             # read along a path
 
 metadata(vf)                            # the optional metadata Form, or nothing
 history(vf)                             # whether this form records history
-set_metadata!(vf, m)                    # transactional; commits a new version
+set_metadata!(vf, m)                    # transactional; metadata only
 ```
+
+`metadata` and `set_metadata!` exist for every database-backed kind
+(`VolatileForm`, `ActorForm`, `PromiseForm`, `StreamForm`, `FormExtern`).
+`metadata` uses a metadata-only query; it never fetches or decodes the payload.
+An edit is transactional: its own transaction reads it back, the next reader
+sees it as soon as the transaction commits, an abort leaves the value unchanged,
+and concurrent edits are validated at commit.
 
 `metadata` is stored in its own JSONB column alongside the payload.
 `history` is fixed at construction: `true` (the default) appends a row to
 `form_history` on every update; `false` keeps only the current row and overwrites
 it.
 
+## Actor, promise, and delay forms
+
+```julia
+ActorForm(db, args...; history = true, metadata = nothing)
+ActorForm(db, form::Form; history = true, metadata = nothing)
+af[]                                     # current value (transactional read)
+send(f, af)                              # update it (deferred in a transaction)
+get_actor(db, id)                        # cached / lazily loaded by id
+
+PromiseForm(db; pending_commit = false, metadata = nothing)
+isready(pf)                              # settled? (delivered or failed)
+isfailed(pf)                             # failed?
+pf[]                                     # value; raises PromiseFailed if failed
+put!(pf, value)                          # deliver once
+fail!(pf, error)                         # fail once, durably
+take(pf; timeout = nothing, token = nothing)
+mark_pending_commit!(pf)                 # inside a transaction that has not committed
+mark_committed!(pf); mark_aborted!(pf)
+get_promise(db, id)
+UncommittedPromise; AbortedPromise
+
+register_delay(:type, load_fn)           # load_fn(::Form) -> Form
+DelayForm(:type, form)                   # a run-once lazy form
+d[]; isready(d)                          # force it (memoized)
+```
+
+See [Actor, promise, and delay forms](actor-promise-delay-forms.md).
+
+## Stream forms
+
+```julia
+StreamForm(db; maxsize = nothing, pending_commit = false, metadata = nothing)
+get_stream(db, id)
+
+put!(sf, value; timeout = nothing, token = ...)
+take(sf; timeout = nothing, token = ...)
+close(sf)
+
+isopen(sf); length(sf); isempty(sf); isready(sf); maxsize(sf); snapshot(sf)
+mark_pending_commit!(sf); mark_committed!(sf); mark_aborted!(sf)
+UncommittedStream; AbortedStream
+metadata(sf); set_metadata!(sf, m)
+```
+
+See [Stream forms](stream-forms.md).
+
 ## Named forms
 
 ```julia
 named_form(db, name; create = false, value = nothing)  # look up, or create, by name
 name_form!(db, name, vf::VolatileForm)                 # register vf under name (overwrites)
+delete_name!(db, name)                                 # release an alias
 named_forms(db)                                        # the whole table, as a PDict
 ```
 
@@ -149,6 +236,17 @@ ExternError
 ```
 
 See [Extern types](externs.md).
+
+## Garbage collection
+
+```julia
+gc!(db; dry_run = false, batch = 1000)  -> GCStats
+```
+
+Sweeps database objects that are reachable neither from a named form nor from a
+live in-memory object, removing their rows and their history. Runs as one
+operation on the writer task (writes wait; reads continue). See
+[Persistence](persistence.md).
 
 ## Air re-exports
 

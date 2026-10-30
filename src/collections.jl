@@ -33,10 +33,14 @@ Base.getindex(s::FormSeq, r::AbstractVector{<:Integer}) =
     FormSeq(FormValue[s.v[i] for i in r])
 Base.iterate(s::FormSeq, st...) = iterate(s.v, st...)
 
-# Content equality, so a flat `Vector` and a promoted `PVector` agree.
-_seq_equal(a, b) = length(a) == length(b) && all(a[i] == b[i] for i in 1:length(a))
+# Content equality, so a flat `Vector` and a promoted `PVector` agree. `==`
+# compares values (so `1 == 1.0`); `isequal` compares with `isequal`, matching
+# the element hash's treatment of NaN and signed zero.
+_seq_equal(a, b) = length(a) == length(b) && all(a[i] == b[i] for i in eachindex(a))
+_seq_isequal(a, b) =
+    length(a) == length(b) && all(isequal(a[i], b[i]) for i in eachindex(a))
 Base.:(==)(a::FormSeq, b::FormSeq) = _seq_equal(a.v, b.v)
-Base.isequal(a::FormSeq, b::FormSeq) = _seq_equal(a.v, b.v)
+Base.isequal(a::FormSeq, b::FormSeq) = _seq_isequal(a.v, b.v)
 function Base.hash(s::FormSeq, h::UInt)
     h = hash(:FormSeq, h)
     for x in s.v
@@ -118,7 +122,15 @@ function Base.:(==)(a::FormMap, b::FormMap)
     end
     return true
 end
-Base.isequal(a::FormMap, b::FormMap) = a == b
+# `isequal` recurses with `isequal`, matching the element hash (NaN equals
+# itself; -0.0 does not equal 0.0).
+function Base.isequal(a::FormMap, b::FormMap)
+    length(a) == length(b) || return false
+    for (k, v) in a
+        (haskey(b, k) && isequal(b[k], v)) || return false
+    end
+    return true
+end
 
 # Order-independent, so a flat and a promoted map that hold the same entries hash
 # the same.

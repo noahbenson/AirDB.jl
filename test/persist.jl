@@ -9,6 +9,34 @@ function _make_parent_child(db)
     return (parent.id, child.id)
 end
 
+function _write_actor(db; history = true)
+    af = ActorForm(db, form(n = 0); history = history)
+    send(af) do v
+        form(n = value(v[:n]) + 1)
+    end
+    _waitfor(() -> value(af[][:n]) == 1)
+    AirDB.sync(db)
+    return af.id
+end
+
+function _write_promise(db)
+    pf = PromiseForm(db)
+    vf = VolatileForm(db, p = pf)     # serialized while undelivered: a row exists
+    AirDB.sync(db)
+    put!(pf, form(x = 1))
+    AirDB.sync(db)
+    return pf.id
+end
+
+# A form holding a stored extern, returned by id so the live handle can be
+# collected and the extern reloaded (unloaded) from its JSON.
+function _extern_form(db, id::Symbol)
+    ex = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(4); id = id)
+    vf = VolatileForm(db, e = ex)
+    AirDB.sync(db)
+    return vf.id
+end
+
 function _make_cycle(db)
     a = VolatileForm(db, "a")
     b = VolatileForm(db, "b")
@@ -18,6 +46,89 @@ function _make_cycle(db)
     AirDB.sync(db)
     return a.id
 end
+
+# A graph with live objects reachable from the name "gc-root" and dead ones held
+# only by a form that is itself dropped. Returns ids only, so the objects can be
+# collected.
+function _gc_postgres_graph(db)
+    root = named_form(db, "gc-root"; create = true, value = form(a = 1))
+    kid = VolatileForm(db, n = 2)
+    @tx root[:kid] = kid
+    af = ActorForm(db, form(n = 0))
+    pf = PromiseForm(db)
+    ex = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(1);
+                   id = Symbol(":gc-live-extern"))
+    @tx begin
+        root[:af] = af
+        root[:pf] = pf
+        root[:ex] = ex
+    end
+    dead_af = ActorForm(db, form(n = 0))
+    dead_pf = PromiseForm(db)
+    dead_ex = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(2);
+                        id = Symbol(":gc-dead-extern"))
+    tmp = VolatileForm(db, af = dead_af, pf = dead_pf, ex = dead_ex)
+    AirDB.sync(db)
+    @tx root[:a] = 2
+    @tx kid[:n] = 3
+    AirDB.sync(db)
+    return (root.id, kid.id, tmp.id, af.id, pf.id, dead_af.id, dead_pf.id)
+end
+
+function _gc_unreachable_named(db)
+    vf = named_form(db, "gc-temp"; create = true, value = form(z = 1))
+    AirDB.sync(db)
+    return vf.id
+end
+
+# Owner metadata on every kind, created in one helper so no local survives.
+function _metadata_objects(db)
+    m = form(owner = "alice")
+    vf = VolatileForm(db, a = 1; metadata = m)
+    af = ActorForm(db, form(n = 0); metadata = m)
+    pf = PromiseForm(db; metadata = m)
+    c = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(1);
+                  id = Symbol(":pg-meta-ext"), metadata = m)
+    holder = VolatileForm(db, e = c, p = pf)     # gives the extern and promise rows
+    AirDB.sync(db)
+    return (vf.id, af.id, pf.id, holder.id)
+end
+
+# Deliver a promise that is never stored anywhere.
+function _deliver_only_durable(db)
+    pf = PromiseForm(db)
+    put!(pf, form(v = 9))
+    AirDB.sync(db)
+    return pf.id
+end
+
+function _fail_only_durable(db)
+    pf = PromiseForm(db)
+    fail!(pf, form(err = "boom"))
+    AirDB.sync(db)
+    return pf.id
+end
+
+function _pg_stream(db)
+    sf = StreamForm(db; maxsize = 3, metadata = form(owner = "alice"))
+    put!(sf, form(a = 1))
+    put!(sf, form(b = 2))
+    close(sf)
+    AirDB.sync(db)
+    return sf.id
+end
+
+function _pg_stream_edited(db)
+    sf = StreamForm(db)
+    put!(sf, form(x = 1))
+    put!(sf, form(x = 2))
+    AirDB.sync(db)
+    return sf.id
+end
+
+_row_count(conn, table, col, id) =
+    Int(LibPQ.execute(conn, "SELECT count(*) FROM $table WHERE $col = \$1::uuid",
+                      (string(id),))[1, 1])
 
 @testset "VolatileForm persistence" begin
     cfg = _TEST_CFG
@@ -189,6 +300,247 @@ end
             @test history(h)
         end
 
+        @testset "actor and promise forms survive JSONB" begin
+            # an actor persists its initial value and every update
+            aid = _write_actor(db)
+            r = LibPQ.execute(conn,
+                "SELECT value, history FROM form_actor_current WHERE actor_id = \$1::uuid",
+                (string(aid),))
+            @test length(r) == 1
+            @test r[1, 1] == "[[], {\":n\": 1}]"
+            @test r[1, 2] == true
+            h = LibPQ.execute(conn,
+                "SELECT count(*) FROM form_actor_history WHERE actor_id = \$1::uuid",
+                (string(aid),))
+            @test h[1, 1] == 2                  # the initial value and one update
+            # a current-only actor keeps no history
+            ahid = _write_actor(db; history = false)
+            h = LibPQ.execute(conn,
+                "SELECT count(*) FROM form_actor_history WHERE actor_id = \$1::uuid",
+                (string(ahid),))
+            @test h[1, 1] == 0
+            # reload the actor in a fresh cache
+            GC.gc(); GC.gc()
+            ar = get_actor(db, aid)
+            @test !isloaded(ar)
+            @test ar[] == form(n = 1)
+            # an undelivered promise keeps an empty row until delivery
+            pf = PromiseForm(db)
+            vf = VolatileForm(db, p = pf)
+            AirDB.sync(db)
+            pid = pf.id
+            q = LibPQ.execute(conn,
+                "SELECT value FROM form_promise WHERE promise_id = \$1::uuid", (string(pid),))
+            @test length(q) == 1
+            @test ismissing(q[1, 1])
+            put!(pf, form(x = 1))
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT value FROM form_promise WHERE promise_id = \$1::uuid", (string(pid),))
+            @test q[1, 1] == "[[], {\":x\": 1}]"
+            # reload the delivered promise in a fresh cache
+            pid2 = _write_promise(db)
+            GC.gc(); GC.gc()
+            pr = get_promise(db, pid2)
+            @test !isloaded(pr)
+            @test isready(pr)
+            @test pr[] == form(x = 1)
+            # a promise delivered before serialization is a link, and its
+            # settlement still creates a durable row
+            pf2 = PromiseForm(db)
+            put!(pf2, form(z = 3))
+            vf2 = VolatileForm(db, p = pf2)
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT state, value FROM form_promise WHERE promise_id = \$1::uuid",
+                (string(pf2.id),))
+            @test length(q) == 1
+            @test q[1, 1] == "delivered"
+            @test q[1, 2] == "[[], {\":z\": 3}]"
+            @test AirDB.to_JSON(get_form(db, vf2.id)[]) ==
+                  "[[], {\":p\": \"~$(pf2.id)\"}]"
+            GC.gc(); GC.gc()
+            r2 = get_form(db, vf2.id)[]
+            @test r2[:p] isa PromiseForm
+            @test r2[:p][] == form(z = 3)
+            # a delay serializes as its type and form and loads the same way
+            df = DelayForm(:double, Form(3))
+            vf3 = VolatileForm(db, d = df)
+            AirDB.sync(db)
+            dr = get_form(db, vf3.id)[]
+            @test dr[:d] isa DelayForm
+            @test dr[:d][] == Form(6)
+        end
+
+        @testset "promise states, metadata, and metadata-only reads" begin
+            # a failure is durable
+            fid = _fail_only_durable(db)
+            q = LibPQ.execute(conn,
+                "SELECT state, error FROM form_promise WHERE promise_id = \$1::uuid",
+                (string(fid),))
+            @test length(q) == 1
+            @test q[1, 1] == "failed"
+            @test q[1, 2] == "[[], {\":err\": \"'boom\"}]"
+            GC.gc(); GC.gc()
+            fr = get_promise(db, fid)
+            @test isfailed(fr)
+            e = try
+                fr[]
+                nothing
+            catch err
+                err
+            end
+            @test e isa Air.PromiseFailed
+            @test e.err == form(err = "boom")
+            # a delivery to a never-stored promise is durable (the ensure fix)
+            pid = _deliver_only_durable(db)
+            q = LibPQ.execute(conn,
+                "SELECT state, value FROM form_promise WHERE promise_id = \$1::uuid",
+                (string(pid),))
+            @test length(q) == 1
+            @test q[1, 1] == "delivered"
+            @test q[1, 2] == "[[], {\":v\": 9}]"
+            GC.gc(); GC.gc()
+            @test get_promise(db, pid)[] == form(v = 9)
+            # owner metadata survives a reload for every kind
+            vid, aid, pfid, hid = _metadata_objects(db)
+            m = form(owner = "alice")
+            GC.gc(); GC.gc()
+            @test metadata(get_form(db, vid)) == m
+            @test metadata(get_actor(db, aid)) == m
+            @test metadata(get_promise(db, pfid)) == m
+            holder = get_form(db, hid)[]
+            @test metadata(holder[:e]) == m
+            @test metadata(holder[:p]) == m
+            # an extern with no row is unmanaged
+            u = construct(get_extern_API(:counter), Form(Symbol(":new")), Form(2))
+            @test metadata(u) === nothing
+            # metadata-only edits reach the database without rewriting payloads
+            m2 = form(owner = "bob")
+            vf2 = get_form(db, vid)
+            af2 = get_actor(db, aid)
+            pf2 = get_promise(db, pfid)
+            ex2 = get_form(db, hid)[][:e]
+            v1 = _current_version(conn, vid)
+            @tx set_metadata!(vf2, m2)
+            @tx set_metadata!(af2, m2)
+            @tx set_metadata!(pf2, m2)
+            @tx set_metadata!(ex2, m2)
+            AirDB.sync(db)
+            @test _current_version(conn, vid) == v1             # no version bump
+            @test metadata(get_form(db, vid)) == m2
+            @test metadata(get_actor(db, aid)) == m2
+            @test metadata(get_promise(db, pfid)) == m2
+            @test metadata(get_form(db, hid)[][:e]) == m2
+            # a metadata read does not decode the payload
+            badid = uuid4()
+            LibPQ.execute(conn,
+                "INSERT INTO form_current (form_id, version, payload, metadata, history) " *
+                "VALUES (\$1::uuid, 1, '\"bogus\"'::jsonb, \$2::jsonb, true)",
+                (string(badid), AirDB.to_JSON(form(owner = "dave"))))
+            bad = get_form(db, badid)
+            @test metadata(bad) == form(owner = "dave")
+            @test !isloaded(bad)
+            @test_throws ArgumentError bad[]
+        end
+
+        @testset "stream forms survive JSONB" begin
+            sid = _pg_stream(db)
+            q = LibPQ.execute(conn,
+                "SELECT maxsize, closed, metadata::text FROM form_stream " *
+                "WHERE stream_id = \$1::uuid", (string(sid),))
+            @test length(q) == 1
+            @test q[1, 1] == 3
+            @test q[1, 2] == true
+            @test q[1, 3] !== missing
+            GC.gc(); GC.gc()
+            r = get_stream(db, sid)
+            @test !isloaded(r)
+            @test snapshot(r) == Form[form(a = 1), form(b = 2)]
+            @test maxsize(r) == 3
+            @test !isopen(r)
+            @test metadata(r) == form(owner = "alice")
+            @test take(r) == form(a = 1)
+            @test take(r) == form(b = 2)
+            @test_throws Air.StreamClosed take(r)
+            # a stream edited but never referenced by a stored form persists
+            oid = _pg_stream_edited(db)
+            GC.gc(); GC.gc()
+            @test snapshot(get_stream(db, oid)) == Form[form(x = 1), form(x = 2)]
+            # a staged put inside a committing transaction reaches the database
+            sf2 = StreamForm(db)
+            @tx put!(sf2, form(w = 9))
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT items::text FROM form_stream WHERE stream_id = \$1::uuid",
+                (string(sf2.id),))
+            @test length(q) == 1
+            @test occursin(":w", string(q[1, 1]))
+            # an aborted transaction discards its staged put
+            sf3 = StreamForm(db)
+            AirDB.sync(db)
+            @test_throws ErrorException @tx begin
+                put!(sf3, form(z = 1))
+                error("abort")
+            end
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT items::text FROM form_stream WHERE stream_id = \$1::uuid",
+                (string(sf3.id),))
+            @test length(q) == 1
+            @test String(q[1, 1]) == "[[], {}]"
+        end
+
+        @testset "garbage collection" begin
+            rid, kid, tid, afid, pfid, dafid, dpfid = _gc_postgres_graph(db)
+            GC.gc(); GC.gc()
+            # earlier testsets left their own unreachable rows in this database,
+            # so the totals are lower bounds; the per-object checks below are exact
+            dry = gc!(db; dry_run = true)
+            @test dry.swept_forms >= 1
+            @test dry.swept_actors >= 1
+            @test dry.swept_promises >= 1
+            @test dry.swept_resources >= 1
+            @test _row_count(conn, "form_current", "form_id", tid) == 1  # nothing deleted
+            st = gc!(db)
+            @test st.swept_forms >= 1
+            # dead rows are gone, with their history
+            @test _row_count(conn, "form_current", "form_id", tid) == 0
+            @test _row_count(conn, "form_history", "form_id", tid) == 0
+            @test _row_count(conn, "form_actor_current", "actor_id", dafid) == 0
+            @test _row_count(conn, "form_actor_history", "actor_id", dafid) == 0
+            @test _row_count(conn, "form_promise", "promise_id", dpfid) == 0
+            @test Int(LibPQ.execute(conn,
+                "SELECT count(*) FROM resources WHERE id = ':gc-dead-extern'")[1, 1]) == 0
+            # live rows and their history survive
+            @test _row_count(conn, "form_current", "form_id", rid) == 1
+            @test _row_count(conn, "form_history", "form_id", rid) >= 2
+            @test _row_count(conn, "form_current", "form_id", kid) == 1
+            @test _row_count(conn, "form_actor_current", "actor_id", afid) == 1
+            @test _row_count(conn, "form_promise", "promise_id", pfid) == 1
+            @test Int(LibPQ.execute(conn,
+                "SELECT count(*) FROM resources WHERE id = ':gc-live-extern'")[1, 1]) == 1
+            # the live objects still load and read
+            r = get_form(db, rid)[]
+            @test r isa FormContainer
+            @test value(r[:kid][:n]) == 3
+            @test get_actor(db, afid)[] == form(n = 0)
+            @test !isready(get_promise(db, pfid))
+            @test r[:ex] isa FormExtern
+            @test value(r[:ex]) isa CounterData
+            # deleting a name releases its form
+            id2 = _gc_unreachable_named(db)
+            GC.gc(); GC.gc()
+            @test _row_count(conn, "form_current", "form_id", id2) == 1
+            delete_name!(db, "gc-temp")
+            AirDB.sync(db)
+            GC.gc(); GC.gc()
+            @test gc!(db).swept_forms >= 1
+            @test _row_count(conn, "form_current", "form_id", id2) == 0
+            delete_name!(db, "gc-root")
+            AirDB.sync(db)
+        end
+
         @testset "concurrent writers" begin
             vf = VolatileForm(db, n = 0)
             AirDB.sync(db)
@@ -273,6 +625,83 @@ end
             AirDB.sync(db)
             @test value(g1[:x]) == 9
             @test value(g2[:x]) == 9
+        end
+
+        @testset "a rehydrated extern can be written back" begin
+            # a helper so the locals are gone before the reload
+            vid = _extern_form(db, Symbol(":rehydrate-ext"))
+            GC.gc(); GC.gc()
+            r = get_form(db, vid)[]
+            @test r[:e] isa FormExtern
+            # rehydrated from the stored JSON, so its data is not in memory
+            @test !r[:e].handle.loaded
+            # copying it into a new form used to crash the writer, which tried to
+            # re-serialize a handle with no data
+            vf2 = VolatileForm(db, e = r[:e])
+            AirDB.sync(db)
+            v = value(get_form(db, vf2.id)[][:e])
+            @test v isa CounterData
+            @test v.n == 4
+        end
+
+        @testset "metadata edits are transactional" begin
+            m1 = form(owner = "kim")
+            m2 = form(owner = "lee")
+            vf = VolatileForm(db, a = 1; metadata = m1)
+            sf = StreamForm(db; metadata = m1)
+            AirDB.sync(db)
+            # a committed edit reaches the row — including a stream's
+            @tx set_metadata!(sf, m2)
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT metadata::text FROM form_stream WHERE stream_id = \$1::uuid",
+                (string(sf.id),))
+            @test AirDB.from_JSON(String(q[1, 1])) == m2
+            # read-your-writes
+            @test (@tx begin
+                set_metadata!(vf, m2)
+                metadata(vf)
+            end) == m2
+            AirDB.sync(db)
+            # an aborted edit changes neither memory nor the row
+            try
+                @tx begin
+                    set_metadata!(vf, m1)
+                    error("abort")
+                end
+            catch
+            end
+            @test metadata(vf) == m2
+            AirDB.sync(db)
+            q = LibPQ.execute(conn,
+                "SELECT metadata::text FROM form_current WHERE form_id = \$1::uuid",
+                (string(vf.id),))
+            @test AirDB.from_JSON(String(q[1, 1])) == m2
+        end
+
+        @testset "numeric tower leaves survive JSONB" begin
+            x = setprecision(256) do
+                parse(BigFloat, "1.1")
+            end
+            z = Complex{BigFloat}(parse(BigFloat, "1.5"), parse(BigFloat, "-2.5"))
+            vf = VolatileForm(db, b = big(2)^100, br = Rational{BigInt}(big(2)^100, 3),
+                              r = 1 // 3, f = x, z = z)
+            AirDB.sync(db)
+            payload = _current_payload(conn, vf.id)
+            @test occursin("\"#big:", payload)
+            @test occursin("\"#bigrat:", payload)
+            @test occursin("\"#rat:1/3\"", payload)
+            @test occursin("\"#bigfloat:256:", payload)
+            r = get_form(db, vf.id)[]
+            @test value(r[:b]) isa BigInt && value(r[:b]) == big(2)^100
+            @test value(r[:br]) isa Rational{BigInt}
+            @test value(r[:br]) == Rational{BigInt}(big(2)^100, 3)
+            @test value(r[:r]) === 1 // 3
+            @test value(r[:f]) isa BigFloat
+            @test precision(value(r[:f])) == 256
+            @test value(r[:f]) == x
+            @test value(r[:z]) isa Complex{BigFloat}
+            @test value(r[:z]) == z
         end
     finally
         close(conn)

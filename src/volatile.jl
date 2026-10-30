@@ -41,19 +41,30 @@ they are touched in turn.
 """
 function load!(vf::VolatileForm)
     vf.loaded && return vf
-    lock(vf.lock)
+    # Serialize loading with `gc!`, so the row cannot be swept mid-load.
+    lock(vf.db.gclock)
     try
-        vf.loaded && return vf
-        _check_health(vf.db)
-        form, metadata, history = _read_current(vf.db, vf.id)
-        vf.volatile = Volatile{Form}(form)
-        vf.metadata = metadata
-        vf.history = history
-        vf.loaded = true
-        vf.persisted = true
-        return vf
+        lock(vf.lock)
+        try
+            vf.loaded && return vf
+            _check_health(vf.db)
+            _check_failed(vf.db, vf.id)
+            form, metadata, history = _read_current(vf.db, vf.id)
+            vf.volatile = Volatile{Form}(form)
+            # A metadata edit commits to the volatile before the row update
+            # lands; never replace an already-known in-memory value with the
+            # (possibly stale) row.
+            vf.metavolatile === nothing &&
+                (vf.metavolatile = Volatile{FormMetadata}(metadata))
+            vf.history = history
+            vf.loaded = true
+            vf.persisted = true
+            return vf
+        finally
+            unlock(vf.lock)
+        end
     finally
-        unlock(vf.lock)
+        unlock(vf.db.gclock)
     end
 end
 
@@ -80,7 +91,7 @@ function VolatileForm(db::AbstractDatabase, form::Form;
     _check_open(db)
     m = metadata === nothing ? nothing : to_form(metadata)
     vf = VolatileForm(uuid4(), Volatile{Form}(form), true, false, ReentrantLock(), db,
-                      m, history)
+                      Volatile{FormMetadata}(m), history)
     _cache_put!(db, vf)
     _register!(vf, form)
     return vf
@@ -93,11 +104,31 @@ end
 """
     metadata(vf::VolatileForm) -> Union{Form,Nothing}
 
-The form's optional metadata.
+The form's optional metadata. Like the body, it lives in an Air `Volatile`, so
+an edit made by [`set_metadata!`](@ref) is visible to the editing transaction and
+to the next reader as soon as the transaction commits.
 """
 function metadata(vf::VolatileForm)
-    vf.loaded || load!(vf)
-    return vf.metadata
+    vf.metavolatile === nothing || return _metavalue(vf)
+    # Read only the metadata columns: a permission check must not fetch or
+    # decode the payload.
+    lock(vf.db.gclock)
+    try
+        vf.metavolatile === nothing || return _metavalue(vf)
+        lock(vf.lock)
+        try
+            vf.loaded && return _metavalue(vf)
+            _check_failed(vf.db, vf.id)
+            meta, hist = _read_form_metadata(vf.db, vf.id)
+            vf.history = hist
+            vf.metavolatile = Volatile{FormMetadata}(meta)
+            return _metavalue(vf)
+        finally
+            unlock(vf.lock)
+        end
+    finally
+        unlock(vf.db.gclock)
+    end
 end
 
 """
@@ -107,7 +138,7 @@ Whether `vf` records its history or keeps only its current row. Fixed at
 construction.
 """
 function history(vf::VolatileForm)
-    vf.loaded || load!(vf)
+    (vf.loaded || vf.metavolatile !== nothing) || metadata(vf)  # the same query carries history
     return vf.history
 end
 
@@ -115,15 +146,22 @@ end
     set_metadata!(vf::VolatileForm, m) -> VolatileForm
 
 Sets the form's metadata (a [`Form`](@ref), or `nothing` to clear it). Like any
-write, this must happen inside a transaction, and it commits a new version of the
-form with the new metadata.
+write, this must happen inside a transaction. The edit is transactional: the same
+transaction reads it back through [`metadata`](@ref), the next reader sees it as
+soon as the transaction commits, another transaction's edit is validated at
+commit, and an aborted transaction leaves the form — in memory and in the
+database — untouched. It is a metadata-only edit: it neither rewrites the
+payload nor adds a version or history row.
 """
 function set_metadata!(vf::VolatileForm, m)
     currtx() === nothing &&
         throw(ArgumentError("metadata can only be set inside a transaction"))
-    vf.loaded || load!(vf)
-    vf.metadata = m === nothing ? nothing : to_form(m)
-    _register!(vf, vf[])
+    # Read the current metadata (without fetching the payload) so the edit is a
+    # write of a volatile that already exists, and so `history` is known.
+    vf.metavolatile === nothing && metadata(vf)
+    meta = m === nothing ? nothing : to_form(m)
+    _setmetavalue!(vf, meta)          # transactional; Air rolls it back on abort
+    _stage_metadata!(:form, vf.id, meta, vf.db)
     return vf
 end
 

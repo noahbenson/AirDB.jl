@@ -74,6 +74,59 @@
         @test iswildcard(from_JSON(to_JSON(Form(Symbol("?abc")))))
     end
 
+    @testset "numeric tower" begin
+        # the marked encodings, and their exact types on the way back
+        @test to_JSON(Form(big(5))) == "\"#big:5\""
+        @test to_JSON(Form(big(-10)^40)) == "\"#big:$(big(-10)^40)\""
+        @test value(from_JSON(to_JSON(Form(big(5))))) isa BigInt
+        @test value(from_JSON(to_JSON(Form(big(5))))) == big(5)
+        @test value(from_JSON("\"#big:5\"")) isa BigInt
+        @test value(from_JSON("\"#big:5\"")) == big(5)
+        @test value(from_JSON("123456789012345678901234567890")) ==
+              big"123456789012345678901234567890"      # a bare integer too big for Int64
+        @test value(from_JSON(to_JSON(Form(1 // 3)))) === 1 // 3
+        @test to_JSON(Form(1 // 3)) == "\"#rat:1/3\""
+        @test to_JSON(Form(-2 // 3)) == "\"#rat:-2/3\""
+        @test to_JSON(Form(Rational{BigInt}(big(2)^100, 3))) ==
+              "\"#bigrat:$(big(2)^100)/3\""
+        @test value(from_JSON("\"#bigrat:$(big(2)^100)/3\"")) isa Rational{BigInt}
+        @test value(from_JSON("\"#bigrat:$(big(2)^100)/3\"")) ==
+              Rational{BigInt}(big(2)^100, 3)
+        # a BigFloat keeps its value and its precision
+        for p in (24, 64, 256, 1024)
+            setprecision(BigFloat, p) do
+                for x in (parse(BigFloat, "0.1"), prevfloat(parse(BigFloat, "1.0")),
+                          nextfloat(parse(BigFloat, "1.0")), BigFloat(1e300),
+                          BigFloat(1e-300), BigFloat(-0.0), BigFloat(Inf),
+                          BigFloat(-Inf), BigFloat(NaN))
+                    s = to_JSON(Form(x))
+                    @test startswith(s, "\"#bigfloat:$p:")
+                    y = value(from_JSON(s))
+                    @test y isa BigFloat
+                    @test precision(y) == p
+                    @test isnan(x) ? isnan(y) : y == x
+                end
+            end
+        end
+        # a Complex{BigFloat} is the usual object with marked parts
+        z = Complex{BigFloat}(parse(BigFloat, "1.5"), parse(BigFloat, "-2.5"))
+        @test to_JSON(Form(z)) ==
+              "{\"re\": \"#bigfloat:256:1.5\", \"im\": \"#bigfloat:256:-2.5\"}"
+        g = value(from_JSON(to_JSON(Form(z))))
+        @test g isa Complex{BigFloat} && g == z
+        # malformed marked numbers are errors
+        @test_throws ArgumentError from_JSON("\"#big:abc\"")
+        @test_throws ArgumentError from_JSON("\"#rat:1/0\"")
+        @test_throws ArgumentError from_JSON("\"#rat:1\"")
+        @test_throws ArgumentError from_JSON("\"#bigrat:1/x\"")
+        @test_throws ArgumentError from_JSON("\"#bigfloat:0:1.0\"")
+        @test_throws ArgumentError from_JSON("\"#bigfloat:256\"")
+        @test_throws ArgumentError from_JSON("\"#bigfloat:256:abc\"")
+        # a mixed complex is an error (the writer never produces one)
+        @test_throws ArgumentError from_JSON("{\"re\": 1.0, \"im\": \"#bigfloat:256:2.0\"}")
+        @test_throws ArgumentError from_JSON("{\"re\": 1, \"im\": 2}")
+    end
+
     @testset "form links" begin
         u = uuid4()
         # a resolver turns "@<uuid>" into a value

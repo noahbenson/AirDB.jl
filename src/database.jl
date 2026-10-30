@@ -8,10 +8,9 @@
 # MIT License
 # Copyright (c) 2020-2026 Noah C. Benson
 
-# Bumped to 4 for the extern resource table and the per-form metadata/history
-# columns. A database written by an earlier version cannot be read and is refused
-# at open time rather than failing per row.
-const _SCHEMA_VERSION = "4"
+# Bumped to 7 for stream forms. A database written by an earlier version cannot
+# be read and is refused at open time rather than failing per row.
+const _SCHEMA_VERSION = "7"
 
 const _DDL_STATEMENTS = [
     """
@@ -47,11 +46,53 @@ const _DDL_STATEMENTS = [
         type        TEXT        NOT NULL,
         id          TEXT        NOT NULL,
         data        BYTEA       NOT NULL,
+        metadata    JSONB,
         PRIMARY KEY (type, id)
     )
     """,
     "CREATE INDEX IF NOT EXISTS resources_type_idx ON resources (type)",
     "CREATE INDEX IF NOT EXISTS resources_id_idx   ON resources (id)",
+    """
+    CREATE TABLE IF NOT EXISTS form_actor_current (
+        actor_id    UUID        PRIMARY KEY,
+        version     BIGINT      NOT NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        value       JSONB       NOT NULL,
+        history     BOOLEAN     NOT NULL DEFAULT TRUE,
+        metadata    JSONB
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS form_actor_history (
+        actor_id    UUID        NOT NULL,
+        version     BIGINT      NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+        tx_id       BIGINT      NOT NULL,
+        value       JSONB       NOT NULL,
+        PRIMARY KEY (actor_id, version)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS form_promise (
+        promise_id   UUID        PRIMARY KEY,
+        state        TEXT        NOT NULL DEFAULT 'pending'
+                                 CHECK (state IN ('pending','delivered','failed')),
+        value        JSONB,
+        error        JSONB,
+        metadata     JSONB,
+        settled_at   TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS form_stream (
+        stream_id  UUID        PRIMARY KEY,
+        items      JSONB       NOT NULL DEFAULT '[]',
+        maxsize    INTEGER,
+        closed     BOOLEAN     NOT NULL DEFAULT FALSE,
+        metadata   JSONB,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    )
+    """,
     "CREATE TABLE IF NOT EXISTS airdb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "INSERT INTO airdb_meta (key, value) VALUES ('schema_version', '$_SCHEMA_VERSION') " *
     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -62,6 +103,10 @@ const _DROP_STATEMENTS = [
     "DROP TABLE IF EXISTS form_history",
     "DROP TABLE IF EXISTS form_current",
     "DROP TABLE IF EXISTS resources",
+    "DROP TABLE IF EXISTS form_actor_history",
+    "DROP TABLE IF EXISTS form_actor_current",
+    "DROP TABLE IF EXISTS form_promise",
+    "DROP TABLE IF EXISTS form_stream",
     "DROP TABLE IF EXISTS airdb_meta",
 ]
 
@@ -101,10 +146,94 @@ const _SELECT_CURRENT_SQL =
     "SELECT payload, metadata, history FROM form_current WHERE form_id = \$1::uuid"
 
 const _UPSERT_RESOURCE_SQL =
-    "INSERT INTO resources (type, id, data) VALUES (\$1, \$2, \$3::bytea) " *
-    "ON CONFLICT (type, id) DO UPDATE SET data = EXCLUDED.data"
+    "INSERT INTO resources (type, id, data, metadata) " *
+    "VALUES (\$1, \$2, \$3::bytea, \$4::jsonb) " *
+    "ON CONFLICT (type, id) DO UPDATE " *
+    "SET data = EXCLUDED.data, metadata = EXCLUDED.metadata"
 
 const _SELECT_RESOURCE_SQL = "SELECT data FROM resources WHERE type = \$1 AND id = \$2"
+const _SELECT_RESOURCE_METADATA_SQL =
+    "SELECT metadata FROM resources WHERE type = \$1 AND id = \$2"
+const _UPDATE_RESOURCE_METADATA_SQL =
+    "UPDATE resources SET metadata = \$3::jsonb WHERE type = \$1 AND id = \$2"
+
+# An actor update: like a form, optionally appending a history row, and carrying
+# the owner/ACL metadata.
+const _UPSERT_ACTOR_SQL = """
+WITH upserted AS (
+    INSERT INTO form_actor_current (actor_id, version, updated_at, value, history, metadata)
+    VALUES (\$1::uuid, 1, clock_timestamp(), \$2::jsonb, \$3::boolean, \$4::jsonb)
+    ON CONFLICT (actor_id) DO UPDATE
+        SET version    = form_actor_current.version + 1,
+            updated_at = clock_timestamp(),
+            value      = EXCLUDED.value,
+            history    = EXCLUDED.history,
+            metadata   = EXCLUDED.metadata
+    RETURNING actor_id, version, value
+)
+INSERT INTO form_actor_history (actor_id, version, created_at, tx_id, value)
+SELECT actor_id, version, clock_timestamp(), \$5::bigint, value FROM upserted
+"""
+const _UPSERT_ACTOR_CURRENT_SQL = """
+INSERT INTO form_actor_current (actor_id, version, updated_at, value, history, metadata)
+VALUES (\$1::uuid, 1, clock_timestamp(), \$2::jsonb, \$3::boolean, \$4::jsonb)
+ON CONFLICT (actor_id) DO UPDATE
+    SET version    = form_actor_current.version + 1,
+        updated_at = clock_timestamp(),
+        value      = EXCLUDED.value,
+        history    = EXCLUDED.history,
+        metadata   = EXCLUDED.metadata
+"""
+
+# Every referenced promise gets a row (created 'pending' if absent, in the same
+# commit that first names or settles it), and is settled by a compare-and-set
+# that only matches a pending row. A delivered promise keeps its row: the link
+# in the form is what preserves its identity.
+const _INSERT_PROMISE_SQL =
+    "INSERT INTO form_promise (promise_id, metadata) VALUES (\$1::uuid, \$2::jsonb) " *
+    "ON CONFLICT (promise_id) DO NOTHING"
+const _DELIVER_PROMISE_SQL =
+    "UPDATE form_promise " *
+    "SET value = \$2::jsonb, state = 'delivered', settled_at = clock_timestamp() " *
+    "WHERE promise_id = \$1::uuid AND state = 'pending' RETURNING promise_id"
+const _FAIL_PROMISE_SQL =
+    "UPDATE form_promise " *
+    "SET error = \$2::jsonb, state = 'failed', settled_at = clock_timestamp() " *
+    "WHERE promise_id = \$1::uuid AND state = 'pending' RETURNING promise_id"
+const _UPSERT_STREAM_SQL =
+    "INSERT INTO form_stream (stream_id, items, maxsize, closed, metadata, updated_at) " *
+    "VALUES (\$1::uuid, \$2::jsonb, \$3::integer, \$4::boolean, \$5::jsonb, " *
+    "        clock_timestamp()) " *
+    "ON CONFLICT (stream_id) DO UPDATE " *
+    "SET items = EXCLUDED.items, maxsize = EXCLUDED.maxsize, closed = EXCLUDED.closed, " *
+    "    metadata = EXCLUDED.metadata, updated_at = clock_timestamp()"
+const _SELECT_STREAM_SQL =
+    "SELECT items::text, maxsize, closed, metadata::text FROM form_stream " *
+    "WHERE stream_id = \$1::uuid"
+const _SELECT_STREAM_METADATA_SQL =
+    "SELECT metadata::text FROM form_stream WHERE stream_id = \$1::uuid"
+const _UPDATE_STREAM_METADATA_SQL =
+    "UPDATE form_stream SET metadata = \$2::jsonb WHERE stream_id = \$1::uuid"
+const _SELECT_ACTOR_SQL =
+    "SELECT value::text, history, metadata::text " *
+    "FROM form_actor_current WHERE actor_id = \$1::uuid"
+const _SELECT_PROMISE_SQL =
+    "SELECT state, value::text, error::text, metadata::text " *
+    "FROM form_promise WHERE promise_id = \$1::uuid"
+
+# Metadata-only reads and updates.
+const _SELECT_CURRENT_METADATA_SQL =
+    "SELECT metadata::text, history FROM form_current WHERE form_id = \$1::uuid"
+const _SELECT_ACTOR_METADATA_SQL =
+    "SELECT metadata::text, history FROM form_actor_current WHERE actor_id = \$1::uuid"
+const _SELECT_PROMISE_METADATA_SQL =
+    "SELECT metadata::text, state FROM form_promise WHERE promise_id = \$1::uuid"
+const _UPDATE_FORM_METADATA_SQL =
+    "UPDATE form_current SET metadata = \$2::jsonb WHERE form_id = \$1::uuid"
+const _UPDATE_ACTOR_METADATA_SQL =
+    "UPDATE form_actor_current SET metadata = \$2::jsonb WHERE actor_id = \$1::uuid"
+const _UPDATE_PROMISE_METADATA_SQL =
+    "UPDATE form_promise SET metadata = \$2::jsonb WHERE promise_id = \$1::uuid"
 
 # A name is an alias for a form id. The writer's upsert overwrites, so a later
 # `name_form!` wins; the in-memory table (the authority for reads) is updated in
@@ -114,6 +243,7 @@ const _UPSERT_NAME_SQL =
     "ON CONFLICT (name) DO UPDATE SET form_id = EXCLUDED.form_id"
 
 const _SELECT_ALL_NAMES_SQL = "SELECT name, form_id::text FROM form_name"
+const _DELETE_NAME_SQL = "DELETE FROM form_name WHERE name = \$1"
 
 """
     FormNotFound(id)
@@ -155,11 +285,21 @@ mutable struct Database <: AbstractDatabase
     config::DatabaseConfig
     writeactor::Actor
     readpool::Channel{LibPQ.Connection}
-    cache::Dict{UUID,WeakRef}
+    cache::Dict{UUID,WeakRef}          # VolatileForm
+    actorcache::Dict{UUID,WeakRef}     # ActorForm
+    promisecache::Dict{UUID,WeakRef}   # PromiseForm
+    streamcache::Dict{UUID,WeakRef}    # StreamForm
     cachelock::ReentrantLock
+    gclock::ReentrantLock              # held exclusively by gc!; shared by loads
     names::Volatile{PDict{String,VolatileForm}}   # the name table, transactional
-    failure::Union{Nothing,DatabaseError}
+    failure::Union{Nothing,DatabaseError}         # the :abort poison marker
+    writefailures::Vector{FailureRecord}          # quarantined write batches
+    failedkeys::Dict{Any,Int}                     # key -> newest failure record
+    lastsuccess::Dict{Any,Int}                    # key -> last successful sequence
+    readfailures::Vector{ReadFailure}
+    faillock::ReentrantLock
     closed::Bool
+    pipeline::Any                                 # the WritePipeline (pipeline.jl)
 end
 
 _check_open(db::AbstractDatabase) = db.closed && throw(ArgumentError("the database is closed"))
@@ -167,8 +307,9 @@ _check_health(db::AbstractDatabase) = db.failure === nothing || throw(db.failure
 
 # Run `f` with a read connection from the pool. The connection is returned to the
 # pool when `f` returns or throws; a connection left broken by an error is
-# replaced so a single bad query does not poison the pool.
-function _withread(f::Function, db::Database)
+# replaced so a single bad query does not poison the pool. `op`/`id` label a
+# failure for `read_failures` and for `load!`'s per-object check.
+function _withread(f::Function, db::Database; op::Symbol = :read, id = nothing)
     _check_open(db)
     _check_health(db)
     conn = take!(db.readpool)
@@ -183,9 +324,12 @@ function _withread(f::Function, db::Database)
         catch e
             attempt += 1
             if !_decide_retry(db, e, attempt, time() - t0)
-                # Under :abort (or a spent retry budget) the error fails the whole
-                # database, not just this read.
-                db.failure === nothing && (db.failure = DatabaseError(e, Any[]))
+                _record_read_failure!(db, e, op, id)
+                # Under :abort the error fails the whole database; under
+                # :isolate it fails only this read.
+                if db.config.failure === :abort
+                    db.failure === nothing && (db.failure = DatabaseError(e, Any[]))
+                end
                 _discard_read_conn!(db, conn)
                 rethrow()
             end
@@ -232,7 +376,7 @@ function _read_current(db::Database, id::UUID)
     # The not-found case is reported by returning `nothing`, not by throwing
     # inside `_withread` — a `FormNotFound` is not a database error and must not
     # poison the database.
-    row = _withread(db) do conn
+    row = _withread(db; op = :load, id = id) do conn
         r = LibPQ.execute(conn, _SELECT_CURRENT_SQL, (string(id),))
         return isempty(r) ? nothing : (r[1, 1], r[1, 2], r[1, 3])
     end
@@ -245,13 +389,119 @@ end
 
 # Read a resource's bytes and let its type deserialize them.
 function _read_resource(db::Database, type::Symbol, id::Symbol)
-    bytes = _withread(db) do conn
+    bytes = _withread(db; op = :load, id = (type, id)) do conn
         r = LibPQ.execute(conn, _SELECT_RESOURCE_SQL, (string(type), string(id)))
         return isempty(r) ? nothing : r[1, 1]
     end
     bytes === nothing &&
         throw(ExternError("no resource :$type/$(id) is stored in the database"))
     return _deserialize_resource(type, Vector{UInt8}(bytes))
+end
+
+# An actor's current value, its history flag, and its metadata.
+function _read_actor(db::Database, id::UUID)
+    row = _withread(db; op = :load, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_ACTOR_SQL, (string(id),))
+        isempty(r) ? nothing : (r[1, 1], r[1, 2], r[1, 3])
+    end
+    row === nothing && throw(FormNotFound(id))
+    payload, hist, meta = row
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (from_JSON(db, String(payload)), Bool(hist), metadata)
+end
+
+# A promise row as `(state, value, error, metadata)`, with the three payloads
+# `nothing` when NULL; or `nothing` when there is no row at all.
+function _read_promise(db::Database, id::UUID)
+    row = _withread(db; op = :load, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_PROMISE_SQL, (string(id),))
+        isempty(r) ? nothing : (String(r[1, 1]), r[1, 2], r[1, 3], r[1, 4])
+    end
+    row === nothing && return nothing
+    state, val, err, meta = row
+    value = (val === nothing || ismissing(val)) ? nothing : from_JSON(db, String(val))
+    error = (err === nothing || ismissing(err)) ? nothing : from_JSON(db, String(err))
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (Symbol(state), value, error, metadata)
+end
+
+# Metadata-only reads: they never fetch or decode the payload.
+function _read_form_metadata(db::Database, id::UUID)
+    row = _withread(db; op = :metadata, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_CURRENT_METADATA_SQL, (string(id),))
+        isempty(r) ? nothing : (r[1, 1], r[1, 2])
+    end
+    row === nothing && throw(FormNotFound(id))
+    meta, hist = row
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (metadata, Bool(hist))
+end
+
+function _read_actor_metadata(db::Database, id::UUID)
+    row = _withread(db; op = :metadata, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_ACTOR_METADATA_SQL, (string(id),))
+        isempty(r) ? nothing : (r[1, 1], r[1, 2])
+    end
+    row === nothing && throw(FormNotFound(id))
+    meta, hist = row
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (metadata, Bool(hist))
+end
+
+# A promise's metadata and state, or `nothing` when it has no row (an
+# uncommitted or never-stored promise).
+function _read_promise_metadata(db::Database, id::UUID)
+    row = _withread(db; op = :metadata, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_PROMISE_METADATA_SQL, (string(id),))
+        isempty(r) ? nothing : (r[1, 1], String(r[1, 2]))
+    end
+    row === nothing && return nothing
+    meta, state = row
+    metadata = (meta === nothing || ismissing(meta)) ? nothing : from_JSON(db, String(meta))
+    return (metadata, Symbol(state))
+end
+
+# A stream row as `(items::Vector{Form}, maxsize, closed, metadata)`, or
+# `nothing` when it has no row.
+function _read_stream(db::Database, id::UUID)
+    row = _withread(db; op = :load, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_STREAM_SQL, (string(id),))
+        isempty(r) ? nothing : (r[1, 1], r[1, 2], r[1, 3], r[1, 4])
+    end
+    row === nothing && return nothing
+    itemsjson, mxs, closed, metajson = row
+    items = Form[]
+    if itemsjson !== nothing && !ismissing(itemsjson)
+        container = from_JSON(db, String(itemsjson))
+        container isa FormContainer ||
+            throw(ArgumentError("stored stream items are not a form list"))
+        for x in container.seq
+            push!(items, to_form(x))
+        end
+    end
+    m = (mxs === nothing || ismissing(mxs)) ? nothing : Int(mxs)
+    metadata = (metajson === nothing || ismissing(metajson)) ? nothing :
+               from_JSON(db, String(metajson))
+    return (items, m, Bool(closed), metadata)
+end
+
+function _read_stream_metadata(db::Database, id::UUID)
+    meta = _withread(db; op = :metadata, id = id) do conn
+        r = LibPQ.execute(conn, _SELECT_STREAM_METADATA_SQL, (string(id),))
+        isempty(r) ? nothing : r[1, 1]
+    end
+    (meta === nothing || ismissing(meta)) && return nothing
+    return from_JSON(db, String(meta))
+end
+
+function _read_resource_metadata(db::Database, type::Symbol, id::Symbol)
+    meta = _withread(db; op = :metadata, id = (type, id)) do conn
+        r = LibPQ.execute(conn, _SELECT_RESOURCE_METADATA_SQL,
+                          (string(type), string(id)))
+        isempty(r) ? nothing : r[1, 1]
+    end
+    (meta === nothing || ismissing(meta)) && return nothing
+    return from_JSON(db, String(meta))
 end
 
 """
@@ -269,13 +519,15 @@ from_JSON(db::AbstractDatabase, s::AbstractString) =
 function _make_database(config::DatabaseConfig)
     wconn = LibPQ.Connection(_conninfo(config))
     txseq = _read_max_txid(wconn)
-    st = FormActorState(config, wconn, PendingWrite[], PendingName[],
-                        Dict{Tuple{Symbol,Symbol},PendingResource}(), txseq, nothing, nothing)
+    st = FormActorState(config, txseq, nothing)
     actor = Actor{FormActorState}(st)
     db = Database(config, actor, Channel{LibPQ.Connection}(config.readpoolsize),
-                  Dict{UUID,WeakRef}(), ReentrantLock(),
+                  Dict{UUID,WeakRef}(), Dict{UUID,WeakRef}(), Dict{UUID,WeakRef}(),
+                  Dict{UUID,WeakRef}(),
+                  ReentrantLock(), ReentrantLock(),
                   Volatile{PDict{String,VolatileForm}}(PDict{String,VolatileForm}()),
-                  nothing, false)
+                  nothing, FailureRecord[], Dict{Any,Int}(), Dict{Any,Int}(),
+                  ReadFailure[], ReentrantLock(), false, nothing)
     st.db = db
     for _ in 1:config.readpoolsize
         put!(db.readpool, LibPQ.Connection(_conninfo(config)))
@@ -284,6 +536,8 @@ function _make_database(config::DatabaseConfig)
     # volatile. Constructing a volatile with a value needs no transaction, and no
     # other thread has the database yet, so replacing the field is safe.
     db.names = Volatile{PDict{String,VolatileForm}}(_load_names(db, wconn))
+    # The pipeline takes ownership of the writer connection from here on.
+    db.pipeline = _start_pipeline!(db, wconn, txseq)
     return db
 end
 
@@ -361,40 +615,19 @@ end
     sync(db::Database)
 
 Blocks until every update sent to `db` before this call has been written to the
-database. The writer actor is sequential, so once it has processed the sync
-message every earlier write is durable.
+database. The pipeline's writer is sequential, so once it has passed the sync
+barrier every earlier write is durable.
 
-Raises the recorded `DatabaseError` if the flush failed.
+Under `:isolate`, a quarantined batch does not make `sync` raise (see
+[`write_failures`](@ref)); under `:abort`, the recorded `DatabaseError` is
+raised.
 """
 function sync(db::Database)
     _check_open(db)
+    currtx() === nothing ||
+        throw(ArgumentError("sync cannot be called inside a transaction"))
     _check_health(db)
-    actor = db.writeactor
-    err0 = geterror(actor)
-    err0 === nothing || throw(err0)
-    sig = Channel{Nothing}(1)
-    err = Ref{Any}(nothing)
-    send(actor) do st
-        try
-            _flush!(st)
-        catch e
-            err[] = e
-        finally
-            put!(sig, nothing)
-        end
-        return st
-    end
-    # A message that throws makes the actor drop everything still queued and stop
-    # (Air `src/TX.jl:218-225`), so a sync sent behind a failing write is never
-    # processed. Wait for the signal, but give up and raise if the actor fails
-    # instead — otherwise this would hang.
-    while !isready(sig)
-        e = geterror(actor)
-        e === nothing || throw(e)
-        sleep(0.001)
-    end
-    take!(sig)
-    err[] === nothing || throw(err[])
+    _queue_barrier!(db)
     return nothing
 end
 
@@ -402,14 +635,17 @@ end
     status(db::Database) -> (npending, error)
 
 The number of updates queued for the writer but not yet written, and the last
-error the writer saw (or `nothing`). If the writer actor is poisoned, the error
-is returned as the second element.
+error the writer saw (or `nothing`).
 """
 function status(db::Database)
-    e = geterror(db.writeactor)
-    e === nothing || return (0, e)
-    st = db.writeactor[]
-    return (length(st.pending), st.last_error)
+    pipe = db.pipeline
+    pipe === nothing && return (0, nothing)
+    lock(pipe.lock)
+    try
+        return (pipe.pendingitems, pipe.last_error)
+    finally
+        unlock(pipe.lock)
+    end
 end
 
 """
@@ -421,20 +657,7 @@ operations raise.
 function Base.close(db::Database)
     db.closed && return db
     db.closed = true
-    try
-        send(db.writeactor) do st
-            try
-                _flush!(st)
-            catch
-            end
-            try
-                close(st.conn)
-            catch
-            end
-            return st
-        end
-    catch
-    end
+    _queue_close!(db)
     while isready(db.readpool)
         try
             close(take!(db.readpool))

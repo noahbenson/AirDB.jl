@@ -3,15 +3,17 @@
 #
 # The JSON codec for `Form`. A container is written as the two-element list
 # `[seq, map]`, with the symbol keys of the map as JSON strings, and a scalar form
-# as its bare leaf; that is what makes the format self-describing. Three encodings
-# are worth stating because they are not forced by JSON itself:
+# as its bare leaf; that is what makes the format self-describing. A few
+# encodings are worth stating because they are not forced by JSON itself:
 #
 #  * A `String` and a `Symbol` are both JSON strings, so the first character
 #    inside the quotes says which: `'` for a string and `:` for a symbol.
-#  * A `Float64` is written as a plain number but always with a decimal point or
+#  * A `Float64` is written as a plain number, but always with a decimal point or
 #    an exponent, since a bare integer would read back as an `Int64`.
-#  * A non-finite `Float64` has no JSON number, so it is written as the string
-#    `"#inf"`, `"#-inf"`, or `"#nan"`. No other value is written with a leading
+#  * Values outside JSON's number model are marked strings: a non-finite float is
+#    `"#inf"`, `"#-inf"`, or `"#nan"`, and the arbitrary-precision leaves are
+#    `"#big:<digits>"`, `"#rat:<num>/<den>"`, `"#bigrat:<num>/<den>"`, and
+#    `"#bigfloat:<precision>:<digits>"`. No other value is written with a leading
 #    `#`, so the marker cannot collide with a string (`'`), a symbol (`:`), or a
 #    form link (`@`).
 #  * A complex number has no JSON equivalent, so it is written as the object
@@ -58,6 +60,23 @@ _jsonvalue(io::IO, x::Bool) = print(io, x ? "true" : "false")
 _jsonvalue(io::IO, x::Int64) = print(io, x)
 _jsonvalue(io::IO, x::AbstractString) = _jsonstring(io, x, '\'')
 _jsonvalue(io::IO, x::Symbol) = _jsonstring(io, string(x), ':')
+
+# The numeric tower's arbitrary-precision leaves are marked strings: a bare JSON
+# number would come back as an `Int64`/`Float64` (and PostgreSQL's `numeric`
+# would apply its own limits and normalization). The marker is `#`, and the
+# payload after it names the type, so a user's string — always written with `'`
+# — can never collide.
+_jsonvalue(io::IO, x::BigInt) = _jsonstring(io, "big:" * string(x), '#')
+_jsonvalue(io::IO, x::Rational{Int64}) =
+    _jsonstring(io, "rat:" * string(numerator(x)) * "/" * string(denominator(x)), '#')
+_jsonvalue(io::IO, x::Rational{BigInt}) =
+    _jsonstring(io, "bigrat:" * string(numerator(x)) * "/" * string(denominator(x)), '#')
+# `string(::BigFloat)` is MPFR's shortest decimal that round-trips at the value's
+# own precision; the precision is stored so `parse` can rebuild that value
+# exactly. Non-finite values print as `Inf`, `-Inf`, and `NaN`.
+function _jsonvalue(io::IO, x::BigFloat)
+    return _jsonstring(io, "bigfloat:" * string(precision(x)) * ":" * string(x), '#')
+end
 # `print`, not `show`: `show(1.5)` writes `1.5` but `show(1.5f0)` would write
 # `1.5f0`, which is not JSON. A float is always written with a point or an
 # exponent, so it never reads back as an integer.
@@ -76,6 +95,15 @@ end
 # latter. The parts go through `_jsonvalue` so that a non-finite component is
 # encoded like any other float.
 function _jsonvalue(io::IO, x::ComplexF64)
+    print(io, "{\"re\": ")
+    _jsonvalue(io, real(x))
+    print(io, ", \"im\": ")
+    _jsonvalue(io, imag(x))
+    return print(io, "}")
+end
+# The same object, with each arbitrary-precision part written as a marked BigFloat
+# string.
+function _jsonvalue(io::IO, x::Complex{BigFloat})
     print(io, "{\"re\": ")
     _jsonvalue(io, real(x))
     print(io, ", \"im\": ")
@@ -124,6 +152,29 @@ function _jsonvalue(io::IO, fe::FormExtern)
     return print(io, "}")
 end
 
+# An actor, a promise, and a stream are always links. A promise is never
+# expanded to its value, delivered or not: the link is what lets a reader wait
+# on the same promise and what lets a delivery or a failure survive the round
+# trip. The promise always has a row to hold its state.
+_jsonvalue(io::IO, af::ActorForm) = _jsonstring(io, string(af.id), '!')
+function _jsonvalue(io::IO, sf::StreamForm)
+    _note_referenced_stream!(sf)
+    return _jsonstring(io, string(sf.id), '&')
+end
+function _jsonvalue(io::IO, pf::PromiseForm)
+    _note_referenced_promise!(pf)
+    return _jsonstring(io, string(pf.id), '~')
+end
+
+# A delay is a type name plus its serialization form; writing it never forces it.
+function _jsonvalue(io::IO, df::DelayForm)
+    print(io, "{\"delay\": ")
+    _jsonstring(io, string(df.type), ':')
+    print(io, ", \"form\": ")
+    _jsonvalue(io, df.form)
+    return print(io, "}")
+end
+
 """
     to_JSON(f::Form) -> String
 
@@ -134,16 +185,22 @@ container (or an extern — see below). A scalar form is written as its bare lea
 A `String` and a `Symbol` are both written as JSON strings, with the first
 character inside the quotes saying which: `'` for a string and `:` for a symbol.
 A `Float64` is a plain number, always with a decimal point or an exponent so that
-it reads back as a float rather than as an integer. A non-finite `Float64` —
-`Inf`, `-Inf`, or `NaN` — has no JSON number, so it is written as the string
-`"#inf"`, `"#-inf"`, or `"#nan"`; the `#` marker cannot be confused with a string
-(`'`), a symbol (`:`), or a link (`@`). A complex number has no JSON
-equivalent and is written as `{"re": …, "im": …}`, always, even when its
-imaginary part is zero. A [`VolatileForm`](@ref) is written as the string
+it reads back as a float rather than as an integer. Values outside JSON's number
+model are marked strings: a non-finite `Float64` — `Inf`, `-Inf`, or `NaN` — is
+`"#inf"`, `"#-inf"`, or `"#nan"`, a `BigInt` is `"#big:<digits>"`, a
+`Rational` is `"#rat:<num>/<den>"` or `"#bigrat:<num>/<den>"`, and a `BigFloat`
+is `"#bigfloat:<precision>:<digits>"` (with its precision in bits). The `#`
+marker cannot be confused with a string (`'`), a symbol (`:`), or a link (`@`).
+A complex number has no JSON equivalent and is written as
+`{"re": …, "im": …}`, always, even when its imaginary part is zero; a
+`Complex{BigFloat}` writes its parts as `BigFloat`s.
+A [`VolatileForm`](@ref) is written as the string
 `"@<uuid>"`; it is never expanded, so cyclic links are safe to write. A
 [`FormExtern`](@ref) is written as the object `{"extern": "<type>", "id":
 "<id>"}` — or `{"extern": "<type>"}` when it is dead — and its bytes live in the
-`resources` table.
+`resources` table. An [`ActorForm`](@ref), [`PromiseForm`](@ref), and
+[`StreamForm`](@ref) are written as the links `"!<uuid>"`, `"~<uuid>"`, and
+`"&<uuid>"`; a promise is a link whether it is pending, delivered, or failed.
 
 """
 function to_JSON(f::Form)
@@ -306,7 +363,9 @@ function _parsestring_slow!(r::_JSONReader)
     end
 end
 
-# An integer literal reads back as an `Int64`; anything with a point or an
+# An integer literal reads back as an `Int64`, or as a `BigInt` when it is too
+# large (the writer only produces `BigInt` in its marked form, but accepting a
+# bare one is convenient for hand-written JSON). Anything with a point or an
 # exponent reads back as the `Float64` the writer would have produced for one.
 # That is what makes the encoding round-trip.
 function _parsenumber!(r::_JSONReader)
@@ -325,8 +384,10 @@ function _parsenumber!(r::_JSONReader)
     r.i = i
     if !occursin('.', text) && !occursin('e', text) && !occursin('E', text)
         v = tryparse(Int64, text)
-        (v === nothing) && _jsonfail(r, "integer out of range: $text")
-        return v
+        v !== nothing && return v
+        b = tryparse(BigInt, text)
+        (b === nothing) && _jsonfail(r, "bad integer: $text")
+        return b
     end
     v = tryparse(Float64, text)
     (v === nothing) && _jsonfail(r, "bad number: $text")
@@ -340,16 +401,23 @@ end
 function _parseleafstring!(r::_JSONReader)
     text = _parsestring!(r)
     isempty(text) &&
-        _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link) or # (a non-finite float)")
+        _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link), " *
+                     "! (an actor link), ~ (a promise link), & (a stream link) or " *
+                     "# (a special number)")
     marker = text[1]
-    rest = SubString(text, nextind(text, 1))
-    (marker == '\'') && return String(rest)
+    # A `String` so the `#` payload can be sliced by ASCII byte offsets below.
+    rest = String(SubString(text, nextind(text, 1)))
+    (marker == '\'') && return rest
     (marker == ':') && return Symbol(rest)
     if marker == '#'
         rest == "inf" && return Inf
         rest == "-inf" && return -Inf
         rest == "nan" && return NaN
-        _jsonfail(r, "\"#$rest\" is not a special float")
+        startswith(rest, "big:") && return _parse_bigint(r, rest)
+        startswith(rest, "rat:") && return _parse_rational(r, rest, 5, false)
+        startswith(rest, "bigrat:") && return _parse_rational(r, rest, 8, true)
+        startswith(rest, "bigfloat:") && return _parse_bigfloat(r, rest)
+        _jsonfail(r, "\"#$rest\" is not a special number")
     end
     if marker == '@'
         (r.resolve === nothing) &&
@@ -361,8 +429,87 @@ function _parseleafstring!(r::_JSONReader)
         end
         return r.resolve(id)
     end
-    _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link) or # (a non-finite float), " *
-                 "not '$marker'")
+    if marker == '!'
+        (r.db === nothing) &&
+            _jsonfail(r, "an actor link (!$rest) needs a Database to be resolved")
+        id = try
+            UUID(rest)
+        catch
+            _jsonfail(r, "an actor link must carry a UUID, not \"$rest\"")
+        end
+        return get_actor(r.db, id)
+    end
+    if marker == '~'
+        (r.db === nothing) &&
+            _jsonfail(r, "a promise link (~$rest) needs a Database to be resolved")
+        id = try
+            UUID(rest)
+        catch
+            _jsonfail(r, "a promise link must carry a UUID, not \"$rest\"")
+        end
+        return get_promise(r.db, id)
+    end
+    if marker == '&'
+        (r.db === nothing) &&
+            _jsonfail(r, "a stream link (&$rest) needs a Database to be resolved")
+        id = try
+            UUID(rest)
+        catch
+            _jsonfail(r, "a stream link must carry a UUID, not \"$rest\"")
+        end
+        return get_stream(r.db, id)
+    end
+    _jsonfail(r, "a JSON string must begin with ' (a string), : (a symbol), @ (a form link), " *
+                 "! (an actor link), ~ (a promise link), & (a stream link) or " *
+                 "# (a special number), not '$marker'")
+end
+
+# ---- the marked numeric encodings --------------------------------------------
+
+function _parse_bigint(r::_JSONReader, s::String)
+    v = tryparse(BigInt, SubString(s, 5))          # after "big:"
+    v === nothing && _jsonfail(r, "\"#$s\" is not a big integer")
+    return v
+end
+
+function _parse_rational(r::_JSONReader, s::String, offset::Int, big::Bool)
+    parts = split(s[offset:end], '/')
+    length(parts) == 2 || _jsonfail(r, "\"#$s\" is not a rational")
+    ntxt, dtxt = parts[1], parts[2]
+    if big
+        n = tryparse(BigInt, ntxt)
+        d = tryparse(BigInt, dtxt)
+        (n === nothing || d === nothing || iszero(d)) &&
+            _jsonfail(r, "\"#$s\" is not a big rational")
+        return n // d
+    end
+    n = tryparse(Int64, ntxt)
+    d = tryparse(Int64, dtxt)
+    (n === nothing || d === nothing || iszero(d)) &&
+        _jsonfail(r, "\"#$s\" is not a rational")
+    return try
+        n // d
+    catch
+        _jsonfail(r, "\"#$s\" is out of range")
+    end
+end
+
+# A corrupt payload must not be able to allocate an unbounded MPFR value.
+const _MAX_BIGFLOAT_PRECISION = 1_000_000
+
+function _parse_bigfloat(r::_JSONReader, s::String)
+    parts = split(s[10:end], ':'; limit = 2)        # after "bigfloat:"
+    length(parts) == 2 || _jsonfail(r, "\"#$s\" is not a big float")
+    prec = tryparse(Int, parts[1])
+    (prec === nothing || prec < 1 || prec > _MAX_BIGFLOAT_PRECISION) &&
+        _jsonfail(r, "\"#$s\" has an invalid precision")
+    digits = parts[2]
+    digits == "Inf" && return BigFloat(Inf; precision = prec)
+    digits == "-Inf" && return BigFloat(-Inf; precision = prec)
+    digits == "NaN" && return BigFloat(NaN; precision = prec)
+    v = tryparse(BigFloat, digits; precision = prec)
+    v === nothing && _jsonfail(r, "\"#$s\" is not a big float")
+    return v
 end
 
 # A map key is always a symbol, so it is written with the `:` marker. The marker
@@ -443,6 +590,13 @@ end
 _externfield(p::Vector{Pair{String,FormValue}}, k::String) =
     (q = findfirst(x -> first(x) == k, p); q === nothing ? nothing : last(p[q]))
 
+# Whether a parsed object is a delay: plain keys `delay` and `form`.
+function _isdelaykeys(p::Vector{Pair{String,FormValue}})
+    length(p) == 2 || return false
+    return (first(p[1]) == "delay" && first(p[2]) == "form") ||
+           (first(p[1]) == "form" && first(p[2]) == "delay")
+end
+
 # Turn a parsed extern object back into a `FormExtern`. A missing `id` is a dead
 # extern; an id resolves through the database's handle registry, though the bytes
 # themselves are read lazily.
@@ -481,12 +635,19 @@ function _parsevalue!(r::_JSONReader)
             return _extern_rehydrate(r, _externfield(pairs, "extern"),
                                      _externfield(pairs, "id"))
         end
+        if _isdelaykeys(pairs)
+            name = _externfield(pairs, "delay")
+            (name isa Symbol) ||
+                _jsonfail(r, "a delay's type must be a symbol")
+            return DelayForm(name, to_form(_externfield(pairs, "form")))
+        end
         if _iscomplexkeys(pairs)
             re = (first(pairs[1]) == "re" ? pairs[1] : pairs[2]).second
             im = (first(pairs[1]) == "im" ? pairs[1] : pairs[2]).second
-            (re isa Float64 && im isa Float64) ||
-                _jsonfail(r, "re and im must be numbers")
-            return ComplexF64(re, im)
+            (re isa Float64 && im isa Float64) && return ComplexF64(re, im)
+            (re isa BigFloat && im isa BigFloat) &&
+                return Complex{BigFloat}(re, im)
+            _jsonfail(r, "re and im must both be Float64 or both be BigFloat")
         end
         kv = Pair{Symbol,FormValue}[_parsekey(r, first(p)) => last(p) for p in pairs]
         return FormContainer(FormSeq(), FormMap(kv))

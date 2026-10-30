@@ -32,8 +32,9 @@
     ExternType
 
 The registered interface of one extern data type: its name, its read-only and
-read-edit operation tables, its constructor table, whether it is immutable, and
-its optional serialization functions. Built by [`register_extern`](@ref).
+read-edit operation tables, its constructor table, whether it is immutable, its
+optional serialization functions, and — for an immutable type that opts in —
+its equivalence functions. Built by [`register_extern`](@ref).
 """
 struct ExternType{T<:AbstractAirExtern}
     name::Symbol
@@ -43,6 +44,8 @@ struct ExternType{T<:AbstractAirExtern}
     immutable::Bool
     serialize::Union{Nothing,Function}    # (data, IO) -> nothing
     deserialize::Union{Nothing,Function}  # (IO) -> data
+    equal::Union{Nothing,Function}        # (data, data) -> Bool
+    hashfn::Union{Nothing,Function}       # (data, seed::UInt) -> UInt
 end
 _typeparam(::ExternType{T}) where {T} = T
 
@@ -76,6 +79,12 @@ with both is database-storable: a form may hold a named extern of that type, and
 the bytes live in the `resources` table. A type with neither is never stored — a
 form that holds one is written as a dead-extern marker.
 
+An **immutable** type may also declare `equal(a, b) -> Bool` and
+`hash(data, seed::UInt) -> UInt` (both, or neither). They give the type value
+semantics in [`isequiv`](@ref)/[`equivhash`](@ref); without them, two externs
+are equivalent only when they wrap the same live handle. A mutable type is
+always identity-equivalent and may not declare them.
+
 ```julia
 register_extern(:config, ConfigData;
     read_only = PDict(Symbol(":version") => (d, args) -> Form(d.version)),
@@ -92,11 +101,17 @@ function register_extern(name::Symbol, ::Type{T};
                          constructors = PDict{Symbol,Function}(),
                          immutable::Bool = false,
                          serialize::Union{Nothing,Function} = nothing,
-                         deserialize::Union{Nothing,Function} = nothing) where {T<:AbstractAirExtern}
+                         deserialize::Union{Nothing,Function} = nothing,
+                         equal::Union{Nothing,Function} = nothing,
+                         hash::Union{Nothing,Function} = nothing) where {T<:AbstractAirExtern}
     immutable && !isempty(read_edit) &&
         throw(ExternError("the extern type $T is immutable but declares read-edit operations"))
     ((serialize === nothing) == (deserialize === nothing)) ||
         throw(ExternError("the extern type $T must declare both serialize and deserialize, or neither"))
+    ((equal === nothing) == (hash === nothing)) ||
+        throw(ExternError("the extern type $T must declare both equal and hash, or neither"))
+    (equal !== nothing && !immutable) &&
+        throw(ExternError("the extern type $T is mutable; its equivalence is always identity"))
     haskey(_EXTERN_BY_NAME, name) && begin
         reg = _EXTERN_BY_NAME[name]
         reg.type === T ||
@@ -108,7 +123,7 @@ function register_extern(name::Symbol, ::Type{T};
     et = ExternType{T}(name, _functiondict(read_only, "operation"),
                        _functiondict(read_edit, "operation"),
                        _functiondict(constructors, "constructor"),
-                       immutable, serialize, deserialize)
+                       immutable, serialize, deserialize, equal, hash)
     _EXTERN_BY_NAME[name] = et
     _EXTERN_BY_TYPE[T] = name
     return et
@@ -136,6 +151,21 @@ function _extern_type(::Type{T}) where {T}
     end
     throw(ExternError("the extern type $T is not registered"))
 end
+
+# Whether a concrete extern data type has a registration (directly or through a
+# supertype), without throwing.
+function _extern_registered(::Type{T}) where {T}
+    S = T
+    while S !== Any
+        haskey(_EXTERN_BY_TYPE, S) && return true
+        S = supertype(S)
+    end
+    return false
+end
+
+# `to_form` wraps a registered extern's data in a `FormExtern`; an unregistered
+# type cannot be represented.
+is_form_representable(x::AbstractAirExtern) = _extern_registered(typeof(x))
 
 # ---- errors ------------------------------------------------------------------
 
@@ -226,7 +256,8 @@ returned data in a [`FormExtern`](@ref). `id`, if given, is the keyword under
 which the extern is stored; it must be unique among live externs.
 """
 function construct(api::ExternAPI{T}, ctor::Form, args::Form;
-                   id::Union{Nothing,Symbol} = nothing) where {T}
+                   id::Union{Nothing,Symbol} = nothing,
+                   metadata = nothing) where {T}
     api.handle === nothing ||
         throw(ExternError("construct must be called on a type-level API"))
     api.editable && throw(ExternError("a type-level API cannot be editable"))
@@ -239,7 +270,9 @@ function construct(api::ExternAPI{T}, ctor::Form, args::Form;
     data isa T ||
         throw(ExternError("the constructor $key for :$(et.name) returned " *
                           "$(typeof(data)), not $T"))
-    h = _extern_handle(T, et.name, id, data, true, nothing)
+    m = metadata === nothing ? nothing : to_form(metadata)
+    h = _extern_handle(T, et.name, id, data, true, nothing;
+                       metadata = m, metaloaded = true)
     id === nothing || _register_handle!(h)
     return FormExtern(h)
 end
@@ -286,10 +319,23 @@ end
 const _EXTERN_HANDLES = Dict{Tuple{Symbol,Symbol},WeakRef}()
 const _EXTERN_HANDLES_LOCK = ReentrantLock()
 
+# Drop the handles whose objects have been collected, as the form caches do: a
+# dead entry is otherwise never removed, so a long-lived process would keep one
+# per extern it has ever loaded. Runs on insertion, now and then.
+function _sweep_dead_handles!()
+    for (k, wr) in collect(_EXTERN_HANDLES)
+        wr.value === nothing && delete!(_EXTERN_HANDLES, k)
+    end
+    return nothing
+end
+_handles_sweep_due() =
+    length(_EXTERN_HANDLES) >= 256 && (length(_EXTERN_HANDLES) & 255) == 0
+
 function _register_handle!(h::ExternHandle)
     h.id === nothing && return h
     lock(_EXTERN_HANDLES_LOCK)
     try
+        _handles_sweep_due() && _sweep_dead_handles!()
         key = (h.type, h.id::Symbol)
         wr = get(_EXTERN_HANDLES, key, nothing)
         if wr !== nothing && wr.value !== nothing && wr.value !== h
@@ -316,7 +362,9 @@ function _get_handle(db::Union{Nothing,AbstractDatabase}, name::Symbol, id::Symb
                 return h::ExternHandle
             end
         end
-        h = _extern_handle(T, name, id, nothing, false, db)
+        _handles_sweep_due() && _sweep_dead_handles!()
+        # A rehydrated handle names a resource row that already exists.
+        h = _extern_handle(T, name, id, nothing, false, db; present = true)
         _EXTERN_HANDLES[(name, id)] = WeakRef(h)
         return h
     finally
@@ -327,20 +375,29 @@ end
 # Read a handle's data from the database on first use.
 function _ensure_loaded(h::ExternHandle)
     h.loaded && return h
-    lock(h.loadlock)
-    try
-        h.loaded && return h
-        h.db === nothing && h.id !== nothing &&
-            throw(ExternError("the extern :$(h.type)/$(h.id) is not attached to a database"))
-        if h.id === nothing
-            h.loaded = true
-            return h
-        end
-        h.data = _read_resource(h.db::AbstractDatabase, h.type, h.id::Symbol)
+    h.db === nothing && h.id !== nothing &&
+        throw(ExternError("the extern :$(h.type)/$(h.id) is not attached to a database"))
+    db = h.db
+    if db === nothing
         h.loaded = true
         return h
+    end
+    # Serialize loading with `gc!`, so a resource row cannot be swept mid-load.
+    lock(db.gclock)
+    try
+        lock(h.loadlock)
+        try
+            h.loaded && return h
+            _check_health(db)
+            h.id === nothing || _check_failed(db, (h.type, h.id::Symbol))
+            h.data = _read_resource(db, h.type, h.id::Symbol)
+            h.loaded = true
+            return h
+        finally
+            unlock(h.loadlock)
+        end
     finally
-        unlock(h.loadlock)
+        unlock(db.gclock)
     end
 end
 
@@ -382,7 +439,10 @@ function _refset()
     task_local_storage(_REF_KEY, s)
     return s
 end
-_note_referenced!(h::ExternHandle) = (_refset()[h] = nothing; nothing)
+function _note_referenced!(h::ExternHandle)
+    _collecting_refs() && (_refset()[h] = nothing)
+    return nothing
+end
 
 # ---- reader/writer locks -----------------------------------------------------
 
@@ -481,6 +541,9 @@ function _collect_externs!(out, fc::FormContainer)
     end
     return out
 end
+# A delay is written as its serialization form, so the externs that form names
+# belong to the delay's references.
+_collect_externs!(out, df::DelayForm) = _collect_externs!(out, df.form)
 
 # Inside a transaction, reading each version registers an Air read, so the
 # transaction retries if a read-edit intervenes.
@@ -582,6 +645,14 @@ function reserve(f::Function, resources...)
 end
 
 function _run_reserve(f::Function, hs::Vector, p::ExternPromise)
+    # Backpressure is checked before any extern lock is taken; the staging in
+    # `_queue_resource_writes` runs under the locks and suppresses it.
+    for h in hs
+        if h.db !== nothing
+            _await_capacity(h.db)
+            break
+        end
+    end
     try
         result = _nested_locks(hs, 1, _rw_write) do
             try
@@ -626,13 +697,18 @@ end
 # Send the bytes of every dirty, storable handle to the writer. The write locks
 # are still held, so the snapshot is consistent.
 function _queue_resource_writes(hs::Vector)
-    for h in hs
-        h.dirty || continue
-        h.dirty = false
-        _storable(h) || continue
-        h.db === nothing && continue          # never stored: nothing to sync
-        bytes = _serialize_resource(h)
-        _stage_resource!(h.db::AbstractDatabase, h.type, h.id::Symbol, bytes)
+    # The caller holds the extern write locks; never wait for writer capacity
+    # here (see `_run_reserve`, which checks before taking the locks).
+    _without_capacity() do
+        for h in hs
+            h.dirty || continue
+            h.dirty = false
+            _storable(h) || continue
+            h.db === nothing && continue      # never stored: nothing to sync
+            bytes = _serialize_resource(h)
+            _stage_resource!(h.db::AbstractDatabase, h.type, h.id::Symbol, bytes;
+                             metadata = _metavalue(h), handle = h)
+        end
     end
     return nothing
 end
@@ -652,6 +728,70 @@ function _gate()
     finally
         unlock(_GATE_LOCK)
     end
+end
+
+# ---- metadata ----------------------------------------------------------------
+
+"""
+    metadata(fe::FormExtern)
+
+The extern's owner/ACL metadata blob, or `nothing` when it has no row (an
+unpersisted or dead extern). Read without touching the resource bytes.
+"""
+function metadata(h::ExternHandle)
+    h.metavolatile === nothing || return _metavalue(h)
+    db = h.db
+    if db === nothing || h.id === nothing
+        lock(h.loadlock)
+        try
+            h.metavolatile === nothing || return _metavalue(h)
+            h.metavolatile = Volatile{FormMetadata}(nothing)
+            return _metavalue(h)
+        finally
+            unlock(h.loadlock)
+        end
+    end
+    lock(db.gclock)
+    try
+        h.metavolatile === nothing || return _metavalue(h)
+        lock(h.loadlock)
+        try
+            h.metavolatile === nothing || return _metavalue(h)
+            _check_failed(db, (h.type, h.id::Symbol))
+            h.metavolatile =
+                Volatile{FormMetadata}(_read_resource_metadata(db, h.type,
+                                                                h.id::Symbol))
+            return _metavalue(h)
+        finally
+            unlock(h.loadlock)
+        end
+    finally
+        unlock(db.gclock)
+    end
+end
+metadata(fe::FormExtern) = metadata(fe.handle)
+
+"""
+    set_metadata!(fe::FormExtern, m) -> FormExtern
+
+Set the extern's owner/ACL metadata (a [`Form`](@ref), or `nothing`). Like a
+metadata edit on any other kind, this must happen inside a transaction and does
+not rewrite the resource bytes; an aborted transaction leaves the value as it
+was. An extern with no id has no row to carry metadata and raises.
+"""
+function set_metadata!(fe::FormExtern, m)
+    h = fe.handle
+    currtx() === nothing &&
+        throw(ArgumentError("metadata can only be set inside a transaction"))
+    h.id === nothing &&
+        throw(ArgumentError("an extern with no id has no persisted metadata to set"))
+    h.metavolatile === nothing && metadata(h)
+    meta = m === nothing ? nothing : to_form(m)
+    _setmetavalue!(h, meta)           # transactional; Air rolls it back on abort
+    if h.db !== nothing
+        _stage_metadata!(:extern, (h.type, h.id::Symbol), meta, h.db)
+    end
+    return fe
 end
 
 # ---- printing and equality ---------------------------------------------------
